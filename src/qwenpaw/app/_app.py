@@ -39,7 +39,6 @@ from ..utils.startup_display import AgentStartupDisplay
 from ..utils.system_info import summarize_python_environment
 from .auth import (
     AuthMiddleware,
-    auto_register_from_env,
     check_proxy_config_sanity,
 )
 from .migration import (
@@ -99,7 +98,6 @@ async def lifespan(  # pylint: disable=too-many-statements,too-many-branches
         logger.error(message, exc_info=True)
         raise RuntimeError(f"{message} Original error: {exc}") from exc
 
-    auto_register_from_env()
     check_proxy_config_sanity()
 
     try:

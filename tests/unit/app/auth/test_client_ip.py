@@ -232,8 +232,7 @@ class TestShouldSkipAuthDefenseInDepth:
 
     @patch("qwenpaw.app.auth._get_config_cached")
     @patch("qwenpaw.app.auth.is_auth_enabled", return_value=True)
-    @patch("qwenpaw.app.auth.has_registered_users", return_value=True)
-    def test_loopback_direct_passes(self, _a, _b, mock_cfg):
+    def test_loopback_direct_passes(self, _a, mock_cfg):
         from qwenpaw.app.auth import AuthMiddleware  # noqa: F811
 
         mock_cfg.return_value = _make_config_return()
@@ -246,8 +245,7 @@ class TestShouldSkipAuthDefenseInDepth:
 
     @patch("qwenpaw.app.auth._get_config_cached")
     @patch("qwenpaw.app.auth.is_auth_enabled", return_value=True)
-    @patch("qwenpaw.app.auth.has_registered_users", return_value=True)
-    def test_loopback_via_proxy_blocked(self, _a, _b, mock_cfg):
+    def test_loopback_via_proxy_blocked(self, _a, mock_cfg):
         """test resolved IP=127.0.0.1 but direct peer is external."""
         from qwenpaw.app.auth import AuthMiddleware  # noqa: F811
 
