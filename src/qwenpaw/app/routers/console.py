@@ -30,6 +30,7 @@ from qwenpaw.schemas import (
 from ...utils.logging import LOG_FILE_PATH, sanitize_log_value
 from ..agent_context import get_agent_for_request
 from ..approvals.display import approval_display_fields
+from ..chats.manager import ChatManager
 from ..chats.title_generator import generate_and_update_title
 from ..utils import check_upload_size
 
@@ -178,6 +179,36 @@ def _extract_session_and_payload(
     return native_payload
 
 
+async def _extract_authenticated_session_and_payload(
+    request_data: Union[AgentRequest, dict],
+    *,
+    chat_manager: ChatManager,
+    acl_sender_id: str = "",
+    acl_roles: Optional[list] = None,
+) -> dict:
+    """Build a console payload with a trusted authenticated user identity."""
+    native_payload = _extract_session_and_payload(
+        request_data,
+        acl_sender_id=acl_sender_id,
+        acl_roles=acl_roles,
+    )
+    if not acl_sender_id or native_payload["channel_id"] != "console":
+        return native_payload
+
+    legacy = await chat_manager.get_chat_by_identity(
+        session_id=native_payload["meta"]["session_id"],
+        user_id="default",
+        channel="console",
+    )
+    if legacy is not None:
+        native_payload["sender_id"] = legacy.user_id
+        native_payload["meta"]["user_id"] = legacy.user_id
+    else:
+        native_payload["sender_id"] = acl_sender_id
+        native_payload["meta"]["user_id"] = acl_sender_id
+    return native_payload
+
+
 def _tail_text_file(
     path: Path,
     *,
@@ -232,8 +263,9 @@ async def post_console_chat(
     acl_sender_id = getattr(request.state, "user", "") or ""
     acl_roles = getattr(request.state, "user_roles", None) or []
     try:
-        native_payload = _extract_session_and_payload(
+        native_payload = await _extract_authenticated_session_and_payload(
             request_data,
+            chat_manager=workspace.chat_manager,
             acl_sender_id=acl_sender_id,
             acl_roles=acl_roles,
         )
@@ -578,7 +610,17 @@ async def post_console_chat_task(  # pylint: disable=too-many-statements
         )
 
     task_id = f"task-{uuid.uuid4().hex[:12]}"
-    native_payload = _extract_session_and_payload(request_data)
+    acl_sender_id = getattr(request.state, "user", "") or ""
+    acl_roles = getattr(request.state, "user_roles", None) or []
+    try:
+        native_payload = await _extract_authenticated_session_and_payload(
+            request_data,
+            chat_manager=workspace.chat_manager,
+            acl_sender_id=acl_sender_id,
+            acl_roles=acl_roles,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     session_id = console_channel.resolve_session_id(
         sender_id=native_payload["sender_id"],
         channel_meta=native_payload["meta"],

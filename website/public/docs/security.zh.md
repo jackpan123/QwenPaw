@@ -920,6 +920,7 @@ QwenPaw 支持可选的 Web 登录认证,保护控制台免受未授权访问。
    - 用户输入自己的 NocoBase 用户名和密码
    - QwenPaw 将凭据转发给 NocoBase,并把 NocoBase 签发的令牌返回给浏览器
    - 令牌存储在浏览器 localStorage,自动附加到所有 API 请求
+   - 当 `user_id_field` 配置为 `username` 时,认证后的新控制台会话使用服务端验证的 NocoBase username 作为会话 UserID;已有会话不会自动迁移
 4. **控制台访问控制** — 对 `console` 频道的访问由角色→频道映射(在插件管理页中配置)决定:已通过 NocoBase 认证的合法用户**默认允许访问**,仅当其角色被显式加入该角色的拒绝列表时才会被拒绝(拒绝始终优先于允许)
 5. **本地免认证** — 来自本地(`127.0.0.1` / `::1`)的请求自动跳过认证,CLI 命令(`qwenpaw app`、`qwenpaw chat` 等)无需令牌即可正常工作
 
