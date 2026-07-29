@@ -92,6 +92,20 @@ class ChatManager:
         async with self._lock:
             return await self._repo.get_chat(chat_id)
 
+    async def get_chat_by_identity(
+        self,
+        session_id: str,
+        user_id: str,
+        channel: str = DEFAULT_CHANNEL,
+    ) -> Optional[ChatSpec]:
+        """Get a chat by its session, user, and channel identity."""
+        async with self._lock:
+            return await self._repo.get_chat_by_id(
+                session_id,
+                user_id,
+                channel,
+            )
+
     async def get_or_create_chat(
         self,
         session_id: str,
