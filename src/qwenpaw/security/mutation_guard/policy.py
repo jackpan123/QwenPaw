@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Any
@@ -54,10 +54,10 @@ class RequestPrincipal:
     @classmethod
     def from_context(
         cls,
-        context: Mapping[str, Any] | None,
+        context: dict[str, Any] | None,
     ) -> "RequestPrincipal":
         """Build a principal from trusted context without broad coercion."""
-        if not isinstance(context, Mapping):
+        if type(context) is not dict:
             return cls()
 
         raw_roles = context.get("roles")
@@ -75,7 +75,7 @@ class RequestPrincipal:
             roles=roles,
             source=source if isinstance(source, str) else "",
             guarded=guarded if isinstance(guarded, bool) else False,
-            can_mutate=(can_mutate if isinstance(can_mutate, bool) else True),
+            can_mutate=can_mutate is True,
         )
 
 

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+from collections import UserDict
 from unittest.mock import patch
 
 import pytest
@@ -126,6 +127,47 @@ def test_context_roles_string_is_not_split_into_characters():
 
     assert principal.roles == ()
     assert principal.guarded is True
+    assert principal.can_mutate is False
+
+
+def test_context_rejects_non_builtin_dict_mapping():
+    principal = RequestPrincipal.from_context(
+        UserDict(
+            {
+                "user_id": "admin-1",
+                "roles": ["admin"],
+                "guarded": True,
+                "can_mutate": True,
+            },
+        ),
+    )
+
+    assert principal == RequestPrincipal()
+
+
+def test_guarded_context_missing_can_mutate_fails_closed():
+    principal = RequestPrincipal.from_context(
+        {
+            "user_id": "member",
+            "roles": ["member"],
+            "guarded": True,
+        },
+    )
+
+    assert principal.can_mutate is False
+
+
+@pytest.mark.parametrize("can_mutate", ["true", 1])
+def test_context_invalid_can_mutate_fails_closed(can_mutate):
+    principal = RequestPrincipal.from_context(
+        {
+            "user_id": "member",
+            "roles": ["member"],
+            "guarded": True,
+            "can_mutate": can_mutate,
+        },
+    )
+
     assert principal.can_mutate is False
 
 

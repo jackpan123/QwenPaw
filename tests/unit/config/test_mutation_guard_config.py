@@ -3,6 +3,9 @@
 
 from __future__ import annotations
 
+import pytest
+from pydantic import ValidationError
+
 from qwenpaw.config.config import (
     Config,
     MutationGuardConfig,
@@ -45,3 +48,16 @@ def test_root_config_round_trips_mutation_guard_configuration():
     assert restored.security.mutation_guard.enabled is False
     assert restored.security.mutation_guard.privileged_roles == ["owner"]
     assert restored.security.mutation_guard.classifier_timeout_seconds == 12
+
+
+@pytest.mark.parametrize("timeout", [1, 60])
+def test_classifier_timeout_accepts_inclusive_boundaries(timeout):
+    config = MutationGuardConfig(classifier_timeout_seconds=timeout)
+
+    assert config.classifier_timeout_seconds == timeout
+
+
+@pytest.mark.parametrize("timeout", [0, 61])
+def test_classifier_timeout_rejects_values_outside_boundaries(timeout):
+    with pytest.raises(ValidationError):
+        MutationGuardConfig(classifier_timeout_seconds=timeout)
