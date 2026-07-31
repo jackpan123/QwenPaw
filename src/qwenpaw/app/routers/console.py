@@ -27,10 +27,12 @@ from qwenpaw.schemas import (
     AgentRequest,
     _coerce_content_item,
 )
+from qwenpaw.security.mutation_guard import RouteCapability
 from ...utils.logging import LOG_FILE_PATH, sanitize_log_value
 from ..agent_context import get_agent_for_request
 from ..approvals.display import approval_display_fields
 from ..chats.title_generator import generate_and_update_title
+from ..mutation_authorization import api_capability
 from ..utils import check_upload_size
 
 
@@ -212,6 +214,7 @@ def _tail_text_file(
     description="Agent API Request Format. See runtime.agentscope.io. "
     "Use body.reconnect=true to attach to a running stream.",
 )
+@api_capability(RouteCapability.CHAT)
 async def post_console_chat(
     request_data: Union[AgentRequest, dict],
     request: Request,
@@ -311,6 +314,7 @@ async def post_console_chat(
     status_code=200,
     summary="Stop running console chat",
 )
+@api_capability(RouteCapability.CHAT)
 async def post_console_chat_stop(
     request: Request,
     chat_id: str = Query(..., description="Chat id (ChatSpec.id) to stop"),
@@ -500,6 +504,7 @@ async def get_inbox_events(
 
 
 @router.post("/inbox/read")
+@api_capability(RouteCapability.CHAT)
 async def post_mark_inbox_read(payload: MarkInboxReadRequest):
     from ..inbox_store import mark_all_read, mark_read
 
@@ -560,6 +565,7 @@ def _parse_sse_payload(line: str) -> Optional[Dict[str, Any]]:
     status_code=200,
     summary="Submit a background chat task",
 )
+@api_capability(RouteCapability.CHAT)
 async def post_console_chat_task(  # pylint: disable=too-many-statements
     request_data: Union[AgentRequest, dict],
     request: Request,
