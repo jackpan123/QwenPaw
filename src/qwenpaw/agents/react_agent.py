@@ -116,12 +116,18 @@ class QwenPawAgent(CodingModeMixin, Agent):
             basic_group = toolkit.tool_groups[0]
             for tool_fn in memory_tools:
                 from ..governance import PolicyGuardedTool
+                from ..runtime.tool_registry import ToolEffectSpec
+                from ..security.mutation_guard import ActionEffect
 
                 basic_group.tools.append(
                     PolicyGuardedTool(
                         tool_fn,
                         governor=self._governor,
                         request_context=self._request_context,
+                        # memory_search is a read-only retrieval op.
+                        effect_spec=ToolEffectSpec(
+                            default=ActionEffect.READ,
+                        ),
                     ),
                 )
             logger.debug(

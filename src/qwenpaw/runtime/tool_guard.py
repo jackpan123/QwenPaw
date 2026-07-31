@@ -60,14 +60,21 @@ def _guarded_tool_init(
     *,
     agent_id: str | None = None,
     request_context: dict[str, str] | None = None,
+    effect_spec: Any = None,
     **kwargs: Any,
 ) -> None:
     from agentscope.tool import FunctionTool
+
+    from .tool_registry import ToolEffectSpec
 
     FunctionTool.__init__(self, func, **kwargs)
     self._qp_agent_id = agent_id  # pylint: disable=protected-access
     # pylint: disable=protected-access
     self._qp_request_context = request_context or {}
+    # Role-based side-effect model for the authoritative mutation gate.
+    # Default UNKNOWN → fail-closed for unannotated tools.
+    # pylint: disable=protected-access
+    self._qp_effect_spec = effect_spec or ToolEffectSpec()
 
 
 def _guarded_tool_resolve_execution_level(self: Any) -> str:
@@ -159,6 +166,49 @@ async def _guarded_tool_check_permissions(
         PermissionBehavior,
         PermissionDecision,
     )
+
+    # ── Authoritative role-based mutation gate (runs FIRST) ──
+    # Runs before execution_level / bypass / tool-guard so a non-privileged
+    # member denied by the mutation guard is rejected even in dev modes.
+    # No-op for local / unauthenticated operation. ``GuardedFunctionTool`` is
+    # the fallback wrapper used when no governor is present (see
+    # ``AgentBuilder._wrap_tool``); the gate applies here too so the role
+    # restriction cannot be bypassed via the fallback path.
+    from .tool_registry import ToolEffectSpec
+    from ..security.mutation_guard import emit_mutation_audit
+    from ..security.mutation_guard.tool_gate import authorize_tool_call
+
+    request_ctx = getattr(self, "_qp_request_context", None) or {}
+    mutation_decision = authorize_tool_call(
+        request_context=request_ctx,
+        effect_spec=(
+            getattr(self, "_qp_effect_spec", None) or ToolEffectSpec()
+        ),
+        input_data=input_data,
+    )
+    if not mutation_decision.allowed:
+        tool_name = getattr(self, "name", "")
+        from ..config.utils import load_config
+
+        cfg = load_config().security.mutation_guard
+        emit_mutation_audit(
+            "tool_denied",
+            tool=tool_name,
+            reason=mutation_decision.reason,
+            user_id=str(
+                (request_ctx.get("request_principal") or {}).get(
+                    "user_id",
+                    "",
+                ),
+            ),
+        )
+        return PermissionDecision(
+            behavior=PermissionBehavior.DENY,
+            message=(
+                f"{cfg.deny_message} mutation_permission_denied "
+                f"({mutation_decision.reason})"
+            ),
+        )
 
     level = self._resolve_execution_level()  # pylint: disable=protected-access
 
