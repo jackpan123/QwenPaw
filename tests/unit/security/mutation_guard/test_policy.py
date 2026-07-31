@@ -63,6 +63,34 @@ def test_nocobase_member_can_only_read(effect, allowed):
     assert decision.reason
 
 
+@pytest.mark.parametrize(
+    "effect",
+    [
+        ActionEffect.MUTATE,
+        ActionEffect.EXTERNAL_SIDE_EFFECT,
+        ActionEffect.UNKNOWN,
+    ],
+)
+def test_denied_effect_reason_identifies_effect(effect):
+    principal = build_request_principal(
+        user_id="member-1",
+        roles=["member"],
+        source="nocobase",
+        auth_enabled=True,
+        config=MutationGuardConfig(),
+    )
+
+    decision = authorize_effect(
+        principal,
+        effect,
+        MutationGuardConfig(),
+    )
+
+    assert decision.reason == (
+        f"effect_{effect.value}_requires_privileged_role"
+    )
+
+
 def test_nocobase_member_can_use_chat_infrastructure():
     principal = build_request_principal(
         user_id="member-1",
@@ -171,6 +199,70 @@ def test_context_invalid_can_mutate_fails_closed(can_mutate):
     assert principal.can_mutate is False
 
 
+@pytest.mark.parametrize(
+    "context",
+    [
+        {},
+        {
+            "user_id": "member",
+            "roles": ["member"],
+            "can_mutate": False,
+        },
+        {
+            "user_id": "member",
+            "roles": ["member"],
+            "guarded": "true",
+            "can_mutate": True,
+        },
+        {
+            "user_id": "member",
+            "roles": ["member"],
+            "guarded": 1,
+            "can_mutate": True,
+        },
+    ],
+)
+def test_malformed_context_denies_mutation(context):
+    principal = RequestPrincipal.from_context(context)
+
+    decision = authorize_effect(
+        principal,
+        ActionEffect.MUTATE,
+        MutationGuardConfig(),
+    )
+
+    assert principal.guarded is True
+    assert principal.can_mutate is False
+    assert decision.allowed is False
+
+
+def test_inconsistent_unguarded_principal_denies_mutation():
+    principal = RequestPrincipal(guarded=False, can_mutate=False)
+
+    decision = authorize_effect(
+        principal,
+        ActionEffect.MUTATE,
+        MutationGuardConfig(),
+    )
+
+    assert decision.allowed is False
+
+
+def test_explicit_unguarded_local_context_can_mutate():
+    principal = RequestPrincipal.from_context(
+        {
+            "guarded": False,
+            "can_mutate": True,
+        },
+    )
+
+    assert authorize_effect(
+        principal,
+        ActionEffect.MUTATE,
+        MutationGuardConfig(),
+    ).allowed
+
+
 @pytest.mark.parametrize("roles", [["member", "admin"], ("member", "admin")])
 def test_context_roles_accept_only_list_or_tuple(roles):
     principal = RequestPrincipal.from_context(
@@ -199,9 +291,13 @@ def test_missing_context_preserves_current_unguarded_behavior():
     ).allowed
 
 
-def _audit_payload(mock_info) -> dict:
+def _rendered_audit(mock_info) -> str:
     fmt, *args = mock_info.call_args.args
-    rendered = fmt % tuple(args)
+    return fmt % tuple(args)
+
+
+def _audit_payload(mock_info) -> dict:
+    rendered = _rendered_audit(mock_info)
     _, _, payload = rendered.partition("] ")
     return json.loads(payload)
 
@@ -256,3 +352,50 @@ def test_audit_redacts_sensitive_fields_without_leaking_values():
     assert "secret-value" not in rendered
     assert "credential-value" not in rendered
     assert "visible" in rendered
+
+
+def test_audit_redacts_extended_sensitive_keys():
+    secrets = {
+        "api_key": "api-key-value",
+        "apikey": "apikey-value",
+        "password": "password-value",
+        "passwd": "passwd-value",
+        "credential": "credential-value",
+    }
+    with patch.object(audit_logger, "info") as mock_info:
+        emit_mutation_audit(
+            "authorization",
+            summary=secrets,
+        )
+
+    rendered = _rendered_audit(mock_info)
+    assert rendered.count("[REDACTED]") == len(secrets)
+    for secret in secrets.values():
+        assert secret not in rendered
+
+
+def test_audit_scrubs_credentials_from_all_free_text():
+    secrets = {
+        "event": "EVENTSECRET",
+        "reason": "REASONSECRET",
+        "api_key": "APISECRET",
+        "password": "PASSWORDSECRET",
+        "authorization": "AUTHSECRET",
+    }
+    with patch.object(audit_logger, "info") as mock_info:
+        emit_mutation_audit(
+            f"access Bearer {secrets['event']}",
+            reason=f"token={secrets['reason']} keep-reason",
+            summary=[
+                f"api_key: {secrets['api_key']}",
+                {"note": f"password={secrets['password']}"},
+                f"authorization: {secrets['authorization']}",
+                "token documentation remains useful",
+            ],
+        )
+
+    rendered = _rendered_audit(mock_info)
+    for secret in secrets.values():
+        assert secret not in rendered
+    assert "keep-reason" in rendered
+    assert "token documentation remains useful" in rendered

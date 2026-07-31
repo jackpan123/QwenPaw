@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections.abc import Mapping
 from typing import Any
 
@@ -26,13 +27,39 @@ _ALLOWED_FIELDS = frozenset(
         "summary",
     },
 )
-_SENSITIVE_KEY_PARTS = ("token", "secret", "authorization")
+_SENSITIVE_KEY_PARTS = (
+    "token",
+    "secret",
+    "authorization",
+    "api_key",
+    "apikey",
+    "password",
+    "passwd",
+    "credential",
+)
 _SUMMARY_MAX_LENGTH = 256
+_BEARER_PATTERN = re.compile(
+    r"(?i)\bBearer\s+(?P<value>[^\s,;\"']+)",
+)
+_NAMED_CREDENTIAL_PATTERN = re.compile(
+    r"(?i)\b(?P<name>"
+    r"token|secret|authorization|api[_-]?key|password|passwd|credential"
+    r")(?P<separator>\s*[:=]\s*)"
+    r"(?P<value>(?:Bearer\s+)?[^\s,;\"'}\]]+)",
+)
 
 
 def _is_sensitive_key(key: str) -> bool:
     normalized = key.casefold()
     return any(part in normalized for part in _SENSITIVE_KEY_PARTS)
+
+
+def _scrub_text(value: str) -> str:
+    value = _BEARER_PATTERN.sub("Bearer [REDACTED]", value)
+    return _NAMED_CREDENTIAL_PATTERN.sub(
+        r"\g<name>\g<separator>[REDACTED]",
+        value,
+    )
 
 
 def _redact(value: Any) -> Any:
@@ -45,9 +72,11 @@ def _redact(value: Any) -> Any:
         }
     if isinstance(value, (list, tuple)):
         return [_redact(item) for item in value]
-    if value is None or isinstance(value, (str, int, float, bool)):
+    if isinstance(value, str):
+        return _scrub_text(value)
+    if value is None or isinstance(value, (int, float, bool)):
         return value
-    return str(value)
+    return _scrub_text(str(value))
 
 
 def _summary(value: Any) -> str:
@@ -68,7 +97,7 @@ def _summary(value: Any) -> str:
 
 def emit_mutation_audit(event: str, **fields: Any) -> None:
     """Emit one allowlisted, redacted mutation audit event."""
-    payload: dict[str, Any] = {"event": str(event)}
+    payload: dict[str, Any] = {"event": _scrub_text(str(event))}
     for key, value in fields.items():
         if key not in _ALLOWED_FIELDS:
             continue

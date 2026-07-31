@@ -70,12 +70,18 @@ class RequestPrincipal:
         source = context.get("source")
         guarded = context.get("guarded")
         can_mutate = context.get("can_mutate")
+        valid_flags = isinstance(guarded, bool) and isinstance(
+            can_mutate,
+            bool,
+        )
+        normalized_guarded = guarded is True if valid_flags else True
+        normalized_can_mutate = can_mutate is True if valid_flags else False
         return cls(
             user_id=user_id if isinstance(user_id, str) else "",
             roles=roles,
             source=source if isinstance(source, str) else "",
-            guarded=guarded if isinstance(guarded, bool) else False,
-            can_mutate=can_mutate is True,
+            guarded=normalized_guarded,
+            can_mutate=normalized_can_mutate,
         )
 
 
@@ -127,7 +133,7 @@ def authorize_effect(
     """Authorize an action effect under the mutation guard."""
     if not config.enabled:
         return MutationDecision(True, "mutation_guard_disabled")
-    if not principal.guarded:
+    if not principal.guarded and principal.can_mutate:
         return MutationDecision(True, "principal_not_guarded")
     if principal.can_mutate:
         return MutationDecision(True, "principal_can_mutate")
@@ -136,4 +142,7 @@ def authorize_effect(
         ActionEffect.CHAT_INFRASTRUCTURE,
     }:
         return MutationDecision(True, "non_mutating_effect")
-    return MutationDecision(False, "mutation_requires_privileged_role")
+    return MutationDecision(
+        False,
+        f"effect_{effect.value}_requires_privileged_role",
+    )
