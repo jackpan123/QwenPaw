@@ -19,6 +19,11 @@ from ..utils.io_utils import run_sync_io
 
 _logger = logging.getLogger(__name__)
 
+# Reserved request_context keys that may never be sourced from the client
+# payload. Only the server-derived channel_meta acl_principal may populate
+# request_principal; a client-supplied value is always dropped (fail-safe).
+_RESERVED_PRINCIPAL_KEYS = frozenset({"request_principal", "acl_principal"})
+
 
 class AgentBuilder:
     """Compose an agent for each request.
@@ -539,7 +544,30 @@ class AgentBuilder:
             getattr(request, "request_context", None) if request else None
         )
         if isinstance(_payload_ctx, dict):
+            # Defensive: a client may try to forge an identity by placing
+            # request_principal inside the payload request_context. Strip
+            # any such value BEFORE copying; the only trustworthy source
+            # is the server-derived channel_meta acl_principal below.
+            _payload_ctx = {
+                k: v
+                for k, v in _payload_ctx.items()
+                if k not in _RESERVED_PRINCIPAL_KEYS
+            }
             rc.update(_payload_ctx)
+        # Server-trusted authorization identity. Sourced ONLY from the
+        # server-derived channel_meta acl_principal. When channel_meta
+        # lacks it (auth disabled, or a client tried to forge one), we
+        # explicitly pop so "server principal missing" stays fail-safe
+        # rather than leaving a client-supplied value in place.
+        trusted = (
+            _channel_meta.get("acl_principal")
+            if isinstance(_channel_meta, dict)
+            else None
+        )
+        if isinstance(trusted, dict):
+            rc["request_principal"] = dict(trusted)
+        else:
+            rc.pop("request_principal", None)
         return rc
 
     @staticmethod

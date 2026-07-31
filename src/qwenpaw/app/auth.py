@@ -239,6 +239,12 @@ _LOOPBACK = frozenset({"127.0.0.1", "::1"})
 _BRACKETED = re.compile(r"^\[([^\]]+)\](?::\d+)?$")
 _V4_PORT = re.compile(r"^(\d{1,3}(?:\.\d{1,3}){3}):\d+$")
 
+# Sentinel returned by ``_handle_internal_principal`` when a credential
+# header was present but failed verification. Distinct from ``None``
+# (meaning "no credential header at all") so the middleware can 401
+# instead of degrading to anonymous/allowlist behavior.
+_INTERNAL_CREDENTIAL_INVALID = object()
+
 _MAX_WARN_IPS = 1024
 _warned_untrusted_ips: set[str] = set()
 
@@ -382,6 +388,28 @@ class AuthMiddleware(BaseHTTPMiddleware):
         call_next,
     ) -> Response:
         """Resolve identity via external providers on protected API routes."""
+        # Internal delegated credential: a parent agent minted a signed,
+        # target-bound principal to call this agent in-process. This is
+        # checked BEFORE the normal skip/allowlist logic so a subagent
+        # call under auth both authenticates AND inherits only the
+        # original user's privileges, WITHOUT forwarding the NocoBase
+        # token (the resolver is never consulted).
+        internal_principal = self._handle_internal_principal(request)
+        if internal_principal is _INTERNAL_CREDENTIAL_INVALID:
+            return Response(
+                content=json.dumps(
+                    {"detail": "Invalid internal credential"},
+                ),
+                status_code=401,
+                media_type="application/json",
+            )
+        if internal_principal is not None:
+            request.state.user = internal_principal.user_id
+            request.state.user_roles = list(internal_principal.roles)
+            request.state.auth_source = internal_principal.source
+            request.state.request_principal = internal_principal
+            return await call_next(request)
+
         if self._should_skip_auth(request):
             return await call_next(request)
 
@@ -405,6 +433,42 @@ class AuthMiddleware(BaseHTTPMiddleware):
             auth_enabled=True,
         )
         return await call_next(request)
+
+    @staticmethod
+    def _handle_internal_principal(
+        request: Request,
+    ) -> Optional[object]:
+        """Verify a delegated internal credential, if present.
+
+        Returns:
+            * a recomputed :class:`RequestPrincipal` when the
+              ``X-QwenPaw-Internal-Principal`` header is present and valid
+              (target-bound to this request's ``X-Agent-Id``);
+            * ``_INTERNAL_CREDENTIAL_INVALID`` when a credential header
+              is present but fails verification (signature, expiry, or
+              target mismatch) — the caller must 401;
+            * ``None`` when no credential header is present (normal path).
+
+        ``guarded``/``can_mutate`` are recomputed from the current config
+        — capability bits in the credential are never trusted. The
+        credential and NocoBase token are never logged.
+        """
+        from .internal_auth import (
+            INTERNAL_PRINCIPAL_HEADER,
+            verify_internal_principal,
+        )
+
+        credential = request.headers.get(INTERNAL_PRINCIPAL_HEADER)
+        if not credential:
+            return None
+        target_agent_id = request.headers.get("X-Agent-Id") or ""
+        principal = verify_internal_principal(
+            credential,
+            target_agent_id=target_agent_id,
+        )
+        if principal is None:
+            return _INTERNAL_CREDENTIAL_INVALID
+        return principal
 
     @staticmethod
     def _should_skip_auth(request: Request) -> bool:

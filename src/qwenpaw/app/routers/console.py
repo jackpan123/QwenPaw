@@ -27,7 +27,10 @@ from qwenpaw.schemas import (
     AgentRequest,
     _coerce_content_item,
 )
-from qwenpaw.security.mutation_guard import RouteCapability
+from qwenpaw.security.mutation_guard import (
+    RequestPrincipal,
+    RouteCapability,
+)
 from ...utils.logging import LOG_FILE_PATH, sanitize_log_value
 from ..agent_context import get_agent_for_request
 from ..approvals.display import approval_display_fields
@@ -109,10 +112,18 @@ def _read_request_field(request_data: Union[AgentRequest, dict], name: str):
     return request_data.get(name)
 
 
+# Reserved request_context keys that the client must NEVER supply. Only
+# the server (the trusted request principal) may write these. Dropping
+# any client-supplied occurrence closes a privilege-escalation vector:
+# otherwise a request body could forge an admin identity.
+_RESERVED_PRINCIPAL_KEYS = frozenset({"request_principal", "acl_principal"})
+
+
 def _extract_session_and_payload(
     request_data: Union[AgentRequest, dict],
     acl_sender_id: str = "",
     acl_roles: Optional[list] = None,
+    request_principal: Optional[RequestPrincipal] = None,
 ):
     """Extract run_key (ChatSpec.id), session_id, and native payload.
 
@@ -156,10 +167,21 @@ def _extract_session_and_payload(
         "user_id": sender_id,
     }
 
-    # Preserve request_context (e.g. session-level approval_level)
+    # Preserve request_context (e.g. session-level approval_level). The
+    # client may never forge an identity: reserved principal keys are
+    # always stripped from the client copy. Only the server-supplied
+    # request_principal may write acl_principal into channel meta.
     rc = _read_request_field(request_data, "request_context")
     if isinstance(rc, dict) and rc:
-        meta["request_context"] = rc
+        client_context = {
+            key: value
+            for key, value in rc.items()
+            if key not in _RESERVED_PRINCIPAL_KEYS
+        }
+        if client_context:
+            meta["request_context"] = client_context
+    if request_principal is not None:
+        meta["acl_principal"] = request_principal.to_context()
 
     native_payload: dict = {
         "channel_id": channel_id,
@@ -234,11 +256,17 @@ async def post_console_chat(
     # which leaves the console ungated.
     acl_sender_id = getattr(request.state, "user", "") or ""
     acl_roles = getattr(request.state, "user_roles", None) or []
+    request_principal = getattr(
+        request.state,
+        "request_principal",
+        None,
+    )
     try:
         native_payload = _extract_session_and_payload(
             request_data,
             acl_sender_id=acl_sender_id,
             acl_roles=acl_roles,
+            request_principal=request_principal,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
@@ -584,7 +612,19 @@ async def post_console_chat_task(  # pylint: disable=too-many-statements
         )
 
     task_id = f"task-{uuid.uuid4().hex[:12]}"
-    native_payload = _extract_session_and_payload(request_data)
+    acl_sender_id = getattr(request.state, "user", "") or ""
+    acl_roles = getattr(request.state, "user_roles", None) or []
+    request_principal = getattr(
+        request.state,
+        "request_principal",
+        None,
+    )
+    native_payload = _extract_session_and_payload(
+        request_data,
+        acl_sender_id=acl_sender_id,
+        acl_roles=acl_roles,
+        request_principal=request_principal,
+    )
     session_id = console_channel.resolve_session_id(
         sender_id=native_payload["sender_id"],
         channel_meta=native_payload["meta"],

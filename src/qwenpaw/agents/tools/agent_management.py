@@ -8,6 +8,7 @@ import math
 import re
 import time
 from typing import Any, Callable, Dict, Optional
+from urllib.parse import urlparse
 from uuid import uuid4
 
 import httpx
@@ -25,6 +26,11 @@ DEFAULT_AGENT_API_BASE_URL = "http://127.0.0.1:8088"
 DEFAULT_AGENT_API_TIMEOUT = 30.0
 MAX_SPAWN_BATCH_SIZE = 10
 MAX_SPAWN_BATCH_CONCURRENCY = 3
+
+# Reserved channel_meta/request_context keys that may never be sourced
+# from the client payload or copied into an inter-agent request body.
+# The trusted principal travels via the signed header, never in plaintext.
+_RESERVED_PRINCIPAL_KEYS = frozenset({"request_principal", "acl_principal"})
 
 
 def resolve_agent_api_base_url(base_url: Optional[str] = None) -> str:
@@ -51,6 +57,34 @@ def _normalize_api_base_url(base_url: Optional[str]) -> str:
     if not base.endswith("/api"):
         base = f"{base}/api"
     return base
+
+
+# Hosts considered local: a credential is only ever sent to these.
+_LOOPBACK_HOSTS = frozenset(
+    {"127.0.0.1", "::1", "localhost", "0.0.0.0", ""},
+)
+
+
+def _is_local_agent_api_target(base_url: Optional[str]) -> bool:
+    """Return True when *base_url* targets the in-process agent API.
+
+    The internal HMAC credential must NEVER be sent to a non-local URL:
+    it would let a remote host impersonate the original user. "Local"
+    means the resolved host is the default base URL, a loopback address,
+    ``localhost``, the unspecified bind address (``0.0.0.0``), or absent
+    (which resolves to the default local base URL).
+    """
+    resolved = resolve_agent_api_base_url(base_url)
+    try:
+        parsed = urlparse(resolved)
+    except ValueError:
+        return False
+    host = (parsed.hostname or "").lower()
+    if host in _LOOPBACK_HOSTS:
+        return True
+    if resolved.rstrip("/") == DEFAULT_AGENT_API_BASE_URL.rstrip("/"):
+        return True
+    return False
 
 
 def _tool_text_response(text: str) -> ToolChunk:
@@ -249,18 +283,42 @@ def build_agent_chat_request(
 
 def _request_headers(
     to_agent: Optional[str],
+    base_url: Optional[str] = None,
 ) -> Dict[str, str]:
     """Build HTTP headers for agent chat requests.
 
+    For in-process (local) targets, attaches a signed, target-bound
+    internal principal credential so the receiving agent authenticates
+    as the original user WITHOUT forwarding the NocoBase token. The
+    credential is NEVER attached for a remote URL (prevents model /
+    network exfiltration of the identity).
+
     Args:
-        to_agent: Target agent ID
+        to_agent: Target agent ID (becomes the credential's bound target
+            and the ``X-Agent-Id`` header).
+        base_url: Effective API base URL; only local targets get the
+            credential.
 
     Returns:
-        Dictionary of HTTP headers
+        Dictionary of HTTP headers.
     """
-    headers = {}
+    headers: Dict[str, str] = {}
     if to_agent:
         headers["X-Agent-Id"] = to_agent
+    if not to_agent or not _is_local_agent_api_target(base_url):
+        return headers
+    from ...app.agent_context import get_current_request_principal
+    from ...app.internal_auth import (
+        INTERNAL_PRINCIPAL_HEADER,
+        mint_internal_principal,
+    )
+
+    principal = get_current_request_principal()
+    if principal is None or not principal.user_id:
+        # Never mint a credential for an anonymous/unknown identity.
+        return headers
+    credential = mint_internal_principal(principal, target_agent_id=to_agent)
+    headers[INTERNAL_PRINCIPAL_HEADER] = credential
     return headers
 
 
@@ -278,7 +336,7 @@ def stream_agent_chat(
             "POST",
             "/console/chat",
             json=request_payload,
-            headers=_request_headers(to_agent),
+            headers=_request_headers(to_agent, base_url),
             timeout=timeout,
         ) as response:
             response.raise_for_status()
@@ -307,7 +365,7 @@ def collect_final_agent_chat_response(
             "POST",
             "/console/chat",
             json=request_payload,
-            headers=_request_headers(to_agent),
+            headers=_request_headers(to_agent, base_url),
             timeout=timeout,
         ) as response:
             response.raise_for_status()
@@ -334,7 +392,7 @@ def submit_agent_chat_task(
         response = client.post(
             "/console/chat/task",
             json=payload,
-            headers=_request_headers(to_agent),
+            headers=_request_headers(to_agent, base_url),
             timeout=timeout,
         )
         response.raise_for_status()
@@ -351,7 +409,7 @@ def get_agent_chat_task_status(
     with create_agent_api_client(base_url) as client:
         response = client.get(
             f"/console/chat/task/{task_id}",
-            headers=_request_headers(to_agent),
+            headers=_request_headers(to_agent, base_url),
             timeout=timeout,
         )
         response.raise_for_status()
@@ -783,7 +841,17 @@ def _build_spawn_request_context(current_agent_id: str) -> dict[str, Any]:
     }
     safe_meta = _json_safe_channel_meta(inherited.get("channel_meta") or {})
     if isinstance(safe_meta, dict) and safe_meta:
-        context["channel_meta"] = safe_meta
+        # The trusted principal must never be copied into the spawn
+        # request body in plaintext — it travels via the signed
+        # X-QwenPaw-Internal-Principal header instead. Strip any
+        # reserved principal key that slipped in via inherited meta.
+        safe_meta = {
+            k: v
+            for k, v in safe_meta.items()
+            if k not in _RESERVED_PRINCIPAL_KEYS
+        }
+        if safe_meta:
+            context["channel_meta"] = safe_meta
     return context
 
 

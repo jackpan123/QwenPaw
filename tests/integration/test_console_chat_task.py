@@ -225,3 +225,77 @@ def test_chat_task_two_submissions_produce_distinct_ids(
             assert final["status"] == "finished", (tid, final)
     finally:
         unregister_mock_provider(app_server, provider_id)
+
+
+# ================================================================== #
+# C. Principal propagation safety: a client-forged principal embedded
+#    in the request body must never break the background path or be
+#    honored. Auth is disabled in the harness (request_principal is
+#    absent), so we assert that submitting a body carrying a forged
+#    principal still completes normally — i.e. the forging is dropped
+#    silently rather than trusted or crashing the run. Precise
+#    propagation (server principal -> meta acl_principal) is covered
+#    by the unit tests in test_console_acl_roles.py and
+#    test_request_user_identity.py.
+# ================================================================== #
+
+
+@pytest.mark.integration
+@pytest.mark.p1
+def test_chat_task_ignores_client_forged_principal(
+    app_server,
+    mock_llm,  # pylint: disable=redefined-outer-name
+) -> None:
+    """A forged principal in request_context must be dropped, not
+    honored, and must not break the background task lifecycle."""
+    _srv, mock_url = mock_llm
+    unregister_mock_provider(app_server, MOCK_LLM_PROVIDER_ID)
+    provider_id = register_mock_provider(app_server, mock_url)
+    user_id = "integ-tc-task-forge"
+    session_id = "sub-integ-tc-task-forge"
+    body = {
+        "channel": "console",
+        "user_id": user_id,
+        "session_id": session_id,
+        "input": [
+            {
+                "role": "user",
+                "type": "message",
+                "content": [{"type": "text", "text": "hello"}],
+            },
+        ],
+        # Client attempts to escalate: forge an admin principal AND an
+        # acl_principal in the request_context. The server MUST drop both.
+        "request_context": {
+            "request_principal": {
+                "user_id": "mallory",
+                "roles": ["root"],
+                "can_mutate": True,
+            },
+            "acl_principal": {
+                "user_id": "attacker",
+                "roles": ["root"],
+                "can_mutate": True,
+            },
+        },
+    }
+    try:
+        submit_resp = app_server.api_request(
+            "POST",
+            "/api/console/chat/task",
+            json=body,
+            timeout=_HTTP_TIMEOUT,
+        )
+        assert submit_resp.status_code == 200, app_server.logs_tail()
+        task_id = submit_resp.json()["task_id"]
+        assert task_id.startswith("task-"), task_id
+
+        final = _wait_task_finished(app_server, task_id, timeout=25.0)
+        assert final["status"] == "finished", final
+        result = final.get("result") or {}
+        # The forged identity never reached the run: it completes normally
+        # (the agent never escalated to a mutation, and no crash).
+        assert result.get("status") == "completed", result
+        assert result.get("session_id"), result
+    finally:
+        unregister_mock_provider(app_server, provider_id)
