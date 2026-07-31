@@ -163,6 +163,42 @@ class DriverCapabilityTool(ToolBase):
         *_args: Any,
         **_kwargs: Any,
     ) -> Any:
+        # Authoritative role-based mutation gate (runs FIRST).  A
+        # non-privileged member is denied any capability whose effect is
+        # not READ/CHAT_INFRASTRUCTURE, even when the Driver's own policy
+        # would allow it.  No-op for local / unauthenticated operation:
+        # with no ``request_principal`` (or one that is not guarded /
+        # can_mutate), :func:`authorize_effect` already returns allowed.
+        from ...config.utils import load_config
+        from ...security.mutation_guard import (
+            RequestPrincipal,
+            authorize_effect,
+            emit_mutation_audit,
+        )
+
+        config = load_config().security.mutation_guard
+        principal = RequestPrincipal.from_context(
+            (self._request_context or {}).get("request_principal"),
+        )
+        decision = authorize_effect(
+            principal,
+            self._capability.effect,
+            config,
+        )
+        if not decision.allowed:
+            emit_mutation_audit(
+                "driver_tool_denied",
+                tool=self.name,
+                reason=decision.reason,
+                user_id=str(principal.user_id),
+            )
+            return PermissionDecision(
+                behavior=PermissionBehavior.DENY,
+                message=(
+                    f"{config.deny_message} mutation_permission_denied "
+                    f"({decision.reason})"
+                ),
+            )
         return PermissionDecision(
             behavior=PermissionBehavior.ALLOW,
             message="Driver capability policy is handled by Driver.",

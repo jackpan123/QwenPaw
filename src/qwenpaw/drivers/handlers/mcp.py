@@ -17,6 +17,7 @@ from ..capabilities import (
     format_capability_id,
     parse_capability_id,
 )
+from ...security.mutation_guard import ActionEffect
 from ..constants import (
     CAPABILITY_KIND_TOOL,
     DRIVER_OPERATION_INVOKE,
@@ -357,6 +358,16 @@ def _mcp_tool_to_capability(
     input_schema.setdefault("type", "object")
     input_schema.setdefault("properties", {})
     input_schema.setdefault("required", [])
+    # Map MCP's declarative ``readOnlyHint`` to the role-based mutation
+    # gate.  A read-only MCP tool is safe for non-privileged members
+    # (READ); every other tool stays UNKNOWN (fail-closed) until a Driver
+    # explicitly classifies it.  ``annotations`` may live on either the
+    # wrapped raw tool or the AgentScope wrapper.
+    annotations = getattr(raw_tool, "annotations", None) or getattr(
+        tool, "annotations", None
+    )
+    read_only = bool(getattr(annotations, "readOnlyHint", False))
+    effect = ActionEffect.READ if read_only else ActionEffect.UNKNOWN
     return DriverCapability(
         # capability_id keeps the original MCP tool name (URL-encoded) so
         # invoke routing always resolves to the server-side name.
@@ -374,6 +385,7 @@ def _mcp_tool_to_capability(
         name=name,
         description=description,
         input_schema=input_schema,
+        effect=effect,
         # tool_name is sanitized to satisfy OpenAI's ^[a-zA-Z0-9_-]+$
         # constraint.
         exposure=CapabilityExposure(
