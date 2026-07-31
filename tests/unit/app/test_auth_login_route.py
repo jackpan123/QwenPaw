@@ -17,6 +17,7 @@ from qwenpaw.app.auth import (
     register_external_login_authenticator,
 )
 from qwenpaw.app.routers import auth as auth_router_mod
+from qwenpaw.config.config import MutationGuardConfig
 
 
 @pytest.fixture(autouse=True)
@@ -45,10 +46,23 @@ class _FakeRateLimiter:
         self.attempts.append((ip, username, success))
 
 
+class _FakeSecurity:
+    mutation_guard = MutationGuardConfig()
+
+
+class _FakeConfig:
+    security = _FakeSecurity()
+
+
 def _build_client(monkeypatch):
     limiter = _FakeRateLimiter()
     monkeypatch.setattr(auth_router_mod, "rate_limiter", limiter)
     monkeypatch.setattr(auth_router_mod, "is_auth_enabled", lambda: True)
+    monkeypatch.setattr(
+        auth_mod,
+        "_get_config_cached",
+        lambda: (_FakeConfig(), []),
+    )
     app = FastAPI()
     app.include_router(auth_router_mod.router, prefix="/api")
     return TestClient(app), limiter
@@ -141,10 +155,14 @@ def test_status_reports_nocobase_mode(monkeypatch):
 
 
 @pytest.mark.p0
-def test_verify_uses_external_resolver(monkeypatch):
+def test_verify_exposes_root_mutation_capability(monkeypatch):
     async def resolver(request):
         if request.headers.get("Authorization") == "Bearer nb-token":
-            return ResolvedIdentity(sender_id="nb-user@example.com")
+            return ResolvedIdentity(
+                sender_id="root-user",
+                roles=["Root"],
+                source="nocobase",
+            )
         return None
 
     register_external_identity_resolver(resolver)
@@ -155,10 +173,59 @@ def test_verify_uses_external_resolver(monkeypatch):
         headers={"Authorization": "Bearer nb-token"},
     )
     assert resp.status_code == 200
-    assert resp.json() == {"valid": True, "username": "nb-user@example.com"}
+    assert resp.json() == {
+        "valid": True,
+        "username": "root-user",
+        "roles": ["Root"],
+        "can_mutate": True,
+    }
 
     resp = client.get(
         "/api/auth/verify",
         headers={"Authorization": "Bearer other"},
     )
     assert resp.status_code == 401
+
+
+@pytest.mark.p0
+def test_verify_uses_live_member_roles_and_ignores_client_claims(monkeypatch):
+    async def resolver(request):
+        if request.headers.get("Authorization") == "Bearer member-token":
+            return ResolvedIdentity(
+                sender_id="member-user",
+                roles=["member"],
+                source="nocobase",
+            )
+        return None
+
+    register_external_identity_resolver(resolver)
+    client, _limiter = _build_client(monkeypatch)
+    resp = client.get(
+        "/api/auth/verify",
+        headers={
+            "Authorization": "Bearer member-token",
+            "X-User-Roles": "Root",
+            "X-Can-Mutate": "true",
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "valid": True,
+        "username": "member-user",
+        "roles": ["member"],
+        "can_mutate": False,
+    }
+
+
+@pytest.mark.p0
+def test_verify_when_auth_disabled_allows_mutation(monkeypatch):
+    client, _limiter = _build_client(monkeypatch)
+    monkeypatch.setattr(auth_router_mod, "is_auth_enabled", lambda: False)
+    resp = client.get("/api/auth/verify")
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "valid": True,
+        "username": "",
+        "roles": [],
+        "can_mutate": True,
+    }

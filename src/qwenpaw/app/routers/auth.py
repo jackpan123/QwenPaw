@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from ..auth import (
     ExternalLoginDenied,
     authenticate_external_login,
+    build_identity_principal,
     is_auth_enabled,
     resolve_client_ip,
     resolve_external_identity,
@@ -99,8 +100,19 @@ async def auth_status():
 async def verify(request: Request):
     """Verify that the caller's external token is still valid."""
     if not is_auth_enabled():
-        return {"valid": True, "username": ""}
+        return {
+            "valid": True,
+            "username": "",
+            "roles": [],
+            "can_mutate": True,
+        }
     identity = await resolve_external_identity(request)
     if identity is None:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
-    return {"valid": True, "username": identity.sender_id}
+    principal = build_identity_principal(identity, auth_enabled=True)
+    return {
+        "valid": True,
+        "username": principal.user_id,
+        "roles": list(principal.roles),
+        "can_mutate": principal.can_mutate,
+    }

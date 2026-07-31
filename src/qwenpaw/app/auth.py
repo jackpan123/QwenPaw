@@ -25,6 +25,10 @@ from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from ..constant import EnvVarLoader
+from ..security.mutation_guard import (
+    RequestPrincipal,
+    build_request_principal,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +72,7 @@ class ResolvedIdentity:
 
     sender_id: str
     roles: list[str] = field(default_factory=list)
+    source: str = "external"
 
 
 # A resolver maps an incoming request to a ResolvedIdentity (the sender_id
@@ -304,6 +309,22 @@ def _get_config_cached():
     return _auth_config_cache[1], _auth_config_cache[2]
 
 
+def build_identity_principal(
+    identity: ResolvedIdentity,
+    *,
+    auth_enabled: bool,
+) -> RequestPrincipal:
+    """Build a trusted request principal from a resolved identity."""
+    config, _ = _get_config_cached()
+    return build_request_principal(
+        user_id=identity.sender_id,
+        roles=identity.roles,
+        source=identity.source,
+        auth_enabled=auth_enabled,
+        config=config.security.mutation_guard,
+    )
+
+
 def _resolve_client_ip(request: Request) -> str:
     """Return the real client IP.
 
@@ -378,6 +399,11 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
         request.state.user = identity.sender_id
         request.state.user_roles = identity.roles
+        request.state.auth_source = identity.source
+        request.state.request_principal = build_identity_principal(
+            identity,
+            auth_enabled=True,
+        )
         return await call_next(request)
 
     @staticmethod

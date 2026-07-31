@@ -83,6 +83,7 @@ def build_identity_resolver(
         identity = ResolvedIdentity(
             sender_id=sender_id,
             roles=NocoBaseClient._extract_roles(user),
+            source="nocobase",
         )
         cache.put(token, identity)
         return identity

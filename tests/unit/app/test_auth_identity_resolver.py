@@ -26,6 +26,7 @@ from qwenpaw.app.auth import (
     unregister_external_login_authenticator,
     unregister_external_identity_resolver,
 )
+from qwenpaw.config.config import MutationGuardConfig
 
 
 @pytest.fixture(autouse=True)
@@ -47,6 +48,20 @@ def test_register_and_has():
     assert has_external_identity_resolvers() is True
     unregister_external_identity_resolver(r)
     assert has_external_identity_resolvers() is False
+
+
+def test_resolved_identity_carries_source():
+    identity = ResolvedIdentity(
+        sender_id="alice",
+        roles=["member"],
+        source="nocobase",
+    )
+    assert identity.source == "nocobase"
+
+
+def test_resolved_identity_defaults_source_for_legacy_resolvers():
+    identity = ResolvedIdentity(sender_id="alice")
+    assert identity.source == "external"
 
 
 def test_register_is_idempotent():
@@ -176,6 +191,7 @@ async def test_external_login_unregisters():
 class _FakeSecurity:
     def __init__(self) -> None:
         self.allow_no_auth_hosts: list[str] = []
+        self.mutation_guard = MutationGuardConfig()
 
 
 class _FakeConfig:
@@ -191,10 +207,19 @@ def _build_client(monkeypatch) -> TestClient:
     )
 
     async def whoami(request):
+        principal = request.state.request_principal
         return JSONResponse(
             {
                 "user": getattr(request.state, "user", None),
                 "roles": getattr(request.state, "user_roles", None),
+                "auth_source": getattr(request.state, "auth_source", None),
+                "principal": {
+                    "user_id": principal.user_id,
+                    "roles": principal.roles,
+                    "source": principal.source,
+                    "guarded": principal.guarded,
+                    "can_mutate": principal.can_mutate,
+                },
             },
         )
 
@@ -211,6 +236,7 @@ def test_middleware_uses_resolver_when_identity_present(monkeypatch):
             return ResolvedIdentity(
                 sender_id="carol@example.com",
                 roles=["admin"],
+                source="nocobase",
             )
         return None
 
@@ -221,7 +247,52 @@ def test_middleware_uses_resolver_when_identity_present(monkeypatch):
         headers={"X-NocoBase-Token": "tok"},
     )
     assert resp.status_code == 200
-    assert resp.json() == {"user": "carol@example.com", "roles": ["admin"]}
+    assert resp.json() == {
+        "user": "carol@example.com",
+        "roles": ["admin"],
+        "auth_source": "nocobase",
+        "principal": {
+            "user_id": "carol@example.com",
+            "roles": ["admin"],
+            "source": "nocobase",
+            "guarded": True,
+            "can_mutate": True,
+        },
+    }
+
+
+def test_middleware_ignores_client_role_claims_for_member(monkeypatch):
+    async def resolver(_request):
+        return ResolvedIdentity(
+            sender_id="member@example.com",
+            roles=["member"],
+            source="nocobase",
+        )
+
+    register_external_identity_resolver(resolver)
+    client = _build_client(monkeypatch)
+    resp = client.post(
+        "/api/console/chat",
+        headers={
+            "X-NocoBase-Token": "tok",
+            "X-User-Roles": "Root",
+            "X-Can-Mutate": "true",
+        },
+        json={"roles": ["Root"], "can_mutate": True},
+    )
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "user": "member@example.com",
+        "roles": ["member"],
+        "auth_source": "nocobase",
+        "principal": {
+            "user_id": "member@example.com",
+            "roles": ["member"],
+            "source": "nocobase",
+            "guarded": True,
+            "can_mutate": False,
+        },
+    }
 
 
 def test_middleware_401_when_resolver_returns_none(monkeypatch):
