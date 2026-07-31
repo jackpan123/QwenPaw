@@ -1,0 +1,47 @@
+# -*- coding: utf-8 -*-
+"""Tests for mutation guard configuration."""
+
+from __future__ import annotations
+
+from qwenpaw.config.config import (
+    Config,
+    MutationGuardConfig,
+    SecurityConfig,
+)
+
+
+def test_mutation_guard_defaults():
+    config = MutationGuardConfig()
+
+    assert config.enabled is True
+    assert config.privileged_roles == ["admin", "root"]
+    assert config.intent_precheck_enabled is True
+    assert config.classifier_timeout_seconds == 8
+    assert "没有执行变更操作的权限" in config.deny_message
+
+
+def test_security_config_includes_mutation_guard_defaults():
+    config = SecurityConfig()
+
+    assert config.mutation_guard == MutationGuardConfig()
+
+
+def test_root_config_round_trips_mutation_guard_configuration():
+    config = Config.model_validate(
+        {
+            "security": {
+                "mutation_guard": {
+                    "enabled": False,
+                    "privileged_roles": ["owner"],
+                    "classifier_timeout_seconds": 12,
+                },
+            },
+        },
+    )
+
+    serialized = config.model_dump()
+    restored = Config.model_validate(serialized)
+
+    assert restored.security.mutation_guard.enabled is False
+    assert restored.security.mutation_guard.privileged_roles == ["owner"]
+    assert restored.security.mutation_guard.classifier_timeout_seconds == 12
