@@ -47,24 +47,41 @@ class _FakeRateLimiter:
 
 
 class _FakeSecurity:
-    mutation_guard = MutationGuardConfig()
+    def __init__(
+        self,
+        allow_no_auth_hosts: list[str] | None = None,
+    ) -> None:
+        self.allow_no_auth_hosts = allow_no_auth_hosts or []
+        self.mutation_guard = MutationGuardConfig()
 
 
 class _FakeConfig:
-    security = _FakeSecurity()
+    def __init__(
+        self,
+        allow_no_auth_hosts: list[str] | None = None,
+    ) -> None:
+        self.security = _FakeSecurity(allow_no_auth_hosts)
 
 
-def _build_client(monkeypatch):
+def _build_client(
+    monkeypatch,
+    *,
+    with_auth_middleware: bool = False,
+    allow_no_auth_hosts: list[str] | None = None,
+):
     limiter = _FakeRateLimiter()
     monkeypatch.setattr(auth_router_mod, "rate_limiter", limiter)
     monkeypatch.setattr(auth_router_mod, "is_auth_enabled", lambda: True)
+    monkeypatch.setattr(auth_mod, "is_auth_enabled", lambda: True)
     monkeypatch.setattr(
         auth_mod,
         "_get_config_cached",
-        lambda: (_FakeConfig(), []),
+        lambda: (_FakeConfig(allow_no_auth_hosts), []),
     )
     app = FastAPI()
     app.include_router(auth_router_mod.router, prefix="/api")
+    if with_auth_middleware:
+        app.add_middleware(auth_mod.AuthMiddleware)
     return TestClient(app), limiter
 
 
@@ -214,6 +231,78 @@ def test_verify_uses_live_member_roles_and_ignores_client_claims(monkeypatch):
         "username": "member-user",
         "roles": ["member"],
         "can_mutate": False,
+    }
+
+
+@pytest.mark.p0
+def test_verify_reuses_middleware_principal_without_identity_drift(
+    monkeypatch,
+):
+    calls = 0
+
+    async def drifting_resolver(_request):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return ResolvedIdentity(
+                sender_id="member-user",
+                roles=["member"],
+                source="nocobase",
+            )
+        return ResolvedIdentity(
+            sender_id="root-user",
+            roles=["Root"],
+            source="nocobase",
+        )
+
+    register_external_identity_resolver(drifting_resolver)
+    client, _limiter = _build_client(
+        monkeypatch,
+        with_auth_middleware=True,
+    )
+    resp = client.get(
+        "/api/auth/verify",
+        headers={"Authorization": "Bearer nb-token"},
+    )
+
+    assert calls == 1
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "valid": True,
+        "username": "member-user",
+        "roles": ["member"],
+        "can_mutate": False,
+    }
+
+
+@pytest.mark.p0
+def test_verify_resolves_once_when_allowlist_skips_middleware(monkeypatch):
+    calls = 0
+
+    async def resolver(_request):
+        nonlocal calls
+        calls += 1
+        return ResolvedIdentity(
+            sender_id="root-user",
+            roles=["Root"],
+            source="nocobase",
+        )
+
+    register_external_identity_resolver(resolver)
+    client, _limiter = _build_client(
+        monkeypatch,
+        with_auth_middleware=True,
+        allow_no_auth_hosts=["testclient"],
+    )
+    resp = client.get("/api/auth/verify")
+
+    assert calls == 1
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "valid": True,
+        "username": "root-user",
+        "roles": ["Root"],
+        "can_mutate": True,
     }
 
 

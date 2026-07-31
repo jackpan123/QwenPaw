@@ -115,7 +115,12 @@ def build_request_principal(
 ) -> RequestPrincipal:
     """Build the guarded principal for an authenticated request."""
     materialized_roles = tuple(roles) if not isinstance(roles, str) else ()
-    guarded = bool(config.enabled and auth_enabled and user_id)
+    guarded = bool(
+        config.enabled
+        and auth_enabled
+        and user_id
+        and source.strip().casefold() == "nocobase"
+    )
     privileged = bool(
         _normalized(materialized_roles) & _normalized(config.privileged_roles)
     )

@@ -295,6 +295,34 @@ def test_middleware_ignores_client_role_claims_for_member(monkeypatch):
     }
 
 
+def test_middleware_preserves_legacy_external_resolver_access(monkeypatch):
+    async def legacy_resolver(_request):
+        return ResolvedIdentity(
+            sender_id="legacy@example.com",
+            roles=["member"],
+        )
+
+    register_external_identity_resolver(legacy_resolver)
+    client = _build_client(monkeypatch)
+    resp = client.post(
+        "/api/console/chat",
+        headers={"Authorization": "Bearer legacy-token"},
+    )
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "user": "legacy@example.com",
+        "roles": ["member"],
+        "auth_source": "external",
+        "principal": {
+            "user_id": "legacy@example.com",
+            "roles": ["member"],
+            "source": "external",
+            "guarded": False,
+            "can_mutate": True,
+        },
+    }
+
+
 def test_middleware_401_when_resolver_returns_none(monkeypatch):
     async def r(_request):
         return None

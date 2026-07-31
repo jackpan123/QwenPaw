@@ -35,6 +35,40 @@ def test_privileged_roles_are_case_insensitive_and_trimmed(role):
 
 
 @pytest.mark.parametrize(
+    ("source", "roles"),
+    [
+        pytest.param("external", [], id="legacy-default"),
+        pytest.param(" External ", ["member"], id="external-member"),
+        pytest.param("custom-sso", ["admin"], id="custom-admin"),
+    ],
+)
+def test_non_nocobase_sources_preserve_legacy_mutation_access(source, roles):
+    principal = build_request_principal(
+        user_id="legacy-user",
+        roles=roles,
+        source=source,
+        auth_enabled=True,
+        config=MutationGuardConfig(),
+    )
+
+    assert principal.guarded is False
+    assert principal.can_mutate is True
+
+
+def test_nocobase_source_is_case_insensitive_and_trimmed():
+    principal = build_request_principal(
+        user_id="member-1",
+        roles=["member"],
+        source=" NoCoBaSe ",
+        auth_enabled=True,
+        config=MutationGuardConfig(),
+    )
+
+    assert principal.guarded is True
+    assert principal.can_mutate is False
+
+
+@pytest.mark.parametrize(
     ("effect", "allowed"),
     [
         (ActionEffect.READ, True),

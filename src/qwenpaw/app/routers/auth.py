@@ -106,10 +106,15 @@ async def verify(request: Request):
             "roles": [],
             "can_mutate": True,
         }
-    identity = await resolve_external_identity(request)
-    if identity is None:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
-    principal = build_identity_principal(identity, auth_enabled=True)
+    principal = getattr(request.state, "request_principal", None)
+    if principal is None:
+        identity = await resolve_external_identity(request)
+        if identity is None:
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid or expired token",
+            )
+        principal = build_identity_principal(identity, auth_enabled=True)
     return {
         "valid": True,
         "username": principal.user_id,
