@@ -171,7 +171,9 @@ class GoalMode(AgentMode):
         """Return goal tools: get/create/update."""
         from ...runtime.tool_registry import (
             ToolDescriptor,
+            ToolEffectSpec,
         )
+        from ...security.mutation_guard import ActionEffect
         from .tools import (
             make_create_goal,
             make_get_goal,
@@ -186,6 +188,7 @@ class GoalMode(AgentMode):
                 description=(
                     "Get the current goal status, " "budgets, and usage."
                 ),
+                effect=ToolEffectSpec(default=ActionEffect.READ),
             ),
             ToolDescriptor(
                 name="create_goal",
@@ -194,12 +197,14 @@ class GoalMode(AgentMode):
                 description=(
                     "Create a goal only when " "explicitly requested."
                 ),
+                effect=ToolEffectSpec(default=ActionEffect.MUTATE),
             ),
             ToolDescriptor(
                 name="update_goal",
                 func=make_update_goal(self),
                 requires_modes=("goal",),
                 description=("Mark goal as complete " "or blocked."),
+                effect=ToolEffectSpec(default=ActionEffect.MUTATE),
             ),
         ]
 

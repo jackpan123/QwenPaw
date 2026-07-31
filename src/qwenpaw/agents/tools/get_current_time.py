@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 @tool_descriptor(
     async_execution=True,
+    side_effect="read",
     tool_type="internal",
     policy_name="GetCurrentTime",
     ui_description="Get current date and time",
@@ -64,6 +65,7 @@ async def get_current_time() -> ToolChunk:
     # would make extract_target() join workspace_dir onto timezone names.
     tool_type="internal",
     target_param="timezone_name",
+    side_effect="mutate",
     policy_name="SetUserTimezone",
     ui_description="Set user timezone",
     ui_icon="🌍",

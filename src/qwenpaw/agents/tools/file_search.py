@@ -596,6 +596,7 @@ def _walk_and_glob(
 @tool_descriptor(
     requires_sandbox=("file_read",),
     async_execution=True,
+    side_effect="read",
     tool_type="file",
     target_param="path",
     policy_name="Grep",
@@ -721,6 +722,7 @@ async def grep_search(
     tool_type="file",
     target_param="path",
     pattern_param="pattern",
+    side_effect="read",
     policy_name="Glob",
     default_policy="allow",
     policy_reason="File listing (global)",

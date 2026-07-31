@@ -16,11 +16,55 @@ from typing import TYPE_CHECKING, Any
 
 from ._state_utils import StateProxy
 from .slash_command_registry import CommandSpec, FallbackHandler
+from ..security.mutation_guard import ActionEffect
 
 if TYPE_CHECKING:
     from agentscope.message import Msg
 
 logger = logging.getLogger(__name__)
+
+# Per-command side-effect classification for the role-based mutation gate.
+# READ / CHAT_INFRASTRUCTURE -> members allowed; MUTATE / UNKNOWN -> denied
+# for guarded non-privileged members. Commands absent from these maps keep
+# the ``CommandSpec.effect`` default (UNKNOWN, fail-closed).
+_DAEMON_EFFECTS: dict[str, ActionEffect] = {
+    "status": ActionEffect.READ,
+    "version": ActionEffect.READ,
+    "logs": ActionEffect.READ,
+    "restart": ActionEffect.MUTATE,
+    "reload-config": ActionEffect.MUTATE,
+    # /daemon <sub> is a router; subcommands include restart/reload-config
+    # (mutate), so the compound entry is fail-closed for members.
+    "daemon": ActionEffect.MUTATE,
+}
+# Control commands. /approval defaults to the "approve" action (resolves a
+# pending approval -> mutates state), so it is fail-closed for members.
+_CONTROL_EFFECTS: dict[str, ActionEffect] = {
+    "approval": ActionEffect.MUTATE,
+    "approve": ActionEffect.MUTATE,
+    "deny": ActionEffect.MUTATE,
+    "model": ActionEffect.MUTATE,
+    "skills": ActionEffect.CHAT_INFRASTRUCTURE,
+    "stop": ActionEffect.CHAT_INFRASTRUCTURE,
+}
+# Conversation commands. Read-only viewers vs. state-changing ops.
+_CONVERSATION_EFFECTS: dict[str, ActionEffect] = {
+    "history": ActionEffect.READ,
+    "compact_str": ActionEffect.READ,
+    "summarize_status": ActionEffect.READ,
+    "message": ActionEffect.READ,
+    "system_prompt": ActionEffect.READ,
+    "reme_status": ActionEffect.READ,
+    "compact": ActionEffect.MUTATE,
+    "new": ActionEffect.MUTATE,
+    "clear": ActionEffect.MUTATE,
+    "load_history": ActionEffect.MUTATE,
+    "dump_history": ActionEffect.MUTATE,
+    "dream": ActionEffect.MUTATE,
+    "memorize": ActionEffect.MUTATE,
+    "proactive": ActionEffect.MUTATE,
+    "plan": ActionEffect.CHAT_INFRASTRUCTURE,
+}
 
 
 # ======================================================================
@@ -67,6 +111,7 @@ def _make_daemon_adapter(subcommand: str) -> CommandSpec:
         name=subcommand,
         handler=_handler,
         category="daemon",
+        effect=_DAEMON_EFFECTS.get(subcommand, ActionEffect.UNKNOWN),
     )
 
 
@@ -132,6 +177,7 @@ def _make_daemon_compound_adapter() -> CommandSpec:
         name="daemon",
         handler=_handler,
         category="daemon",
+        effect=_DAEMON_EFFECTS.get("daemon", ActionEffect.UNKNOWN),
     )
 
 
@@ -150,6 +196,7 @@ def _collect_daemon_specs() -> list[CommandSpec]:
             handler=rc_spec.handler,
             aliases=("reload_config",),
             category=rc_spec.category,
+            effect=rc_spec.effect,
         ),
     )
     specs.append(_make_daemon_compound_adapter())
@@ -241,6 +288,10 @@ def _make_control_adapter(
         handler=_handler,
         category="control",
         help_text=help_text,
+        effect=_CONTROL_EFFECTS.get(
+            command_name,
+            ActionEffect.UNKNOWN,
+        ),
     )
 
 
@@ -491,6 +542,7 @@ def _make_conversation_adapter(
         handler=_handler,
         category="conversation",
         help_text=help_text,
+        effect=_CONVERSATION_EFFECTS.get(name, ActionEffect.UNKNOWN),
     )
 
 

@@ -128,6 +128,7 @@ async def _capture_macos_screencapture(
     async_execution=True,
     tool_type="file",
     target_param="path",
+    side_effect="read",
     policy_name="DesktopScreenshot",
     ui_description="Capture desktop screenshots",
     ui_icon="📸",

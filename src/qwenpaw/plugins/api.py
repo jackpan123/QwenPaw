@@ -906,6 +906,7 @@ class PluginApi:  # pylint: disable=too-many-public-methods
         category: str = "plugin",
         help_text: str = "",
         metadata: Optional[Dict[str, Any]] = None,
+        side_effect: str = "unknown",
     ) -> None:
         """Register a slash command into per-workspace registries.
 
@@ -922,8 +923,15 @@ class PluginApi:  # pylint: disable=too-many-public-methods
             category: Origin tag for introspection.
             help_text: Human-readable description shown in menus.
             metadata: Arbitrary key-value metadata.
+            side_effect: Role-based mutation-gate classification for the
+                command — one of ``"read"``, ``"mutate"``,
+                ``"external_side_effect"``, ``"chat_infrastructure"``,
+                ``"unknown"``. Defaults to ``"unknown"`` (fail-closed for
+                non-privileged members). Mapped to an :class:`ActionEffect`
+                via the same logic as ``@tool_descriptor``.
         """
         from ..runtime.slash_command_registry import CommandSpec
+        from ..runtime.tool_registry import _resolve_default_effect
 
         spec = CommandSpec(
             name=name,
@@ -932,6 +940,7 @@ class PluginApi:  # pylint: disable=too-many-public-methods
             category=category,
             help_text=help_text,
             metadata=metadata or {},
+            effect=_resolve_default_effect(side_effect),
         )
 
         def _register_to_workspaces():

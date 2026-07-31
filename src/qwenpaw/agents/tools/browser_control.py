@@ -4872,6 +4872,21 @@ def _workspace_dir_key(workspace_dir: str | Path) -> str:
 
 @tool_descriptor(
     async_execution=True,
+    side_effect="external_side_effect",
+    side_effect_param="action",
+    read_only_values=(
+        "start",
+        "stop",
+        "open",
+        "navigate",
+        "snapshot",
+        "screenshot",
+        "console_messages",
+        "network_requests",
+        "tabs",
+        "wait_for",
+        "list_cdp_targets",
+    ),
     tool_type="network",
     target_param="url",
     policy_name="Browser",

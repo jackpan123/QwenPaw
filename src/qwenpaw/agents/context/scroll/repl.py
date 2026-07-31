@@ -24,7 +24,8 @@ from agentscope.message import TextBlock, ToolResultState
 from agentscope.tool import ToolChunk
 
 from ...tools.utils import truncate_text_output  # repo-standard output bound
-from ....runtime.tool_registry import ToolDescriptor
+from ....runtime.tool_registry import ToolDescriptor, ToolEffectSpec
+from ....security.mutation_guard import ActionEffect
 
 # Directory holding memoryspace.py — added to the cell's sys.path so the
 # sandboxed process imports it by bare module name.
@@ -212,6 +213,7 @@ def make_recall_history_python(
         requires_sandbox=("shell_exec",),
         async_execution=True,
         description=_DOC.splitlines()[0],
+        effect=ToolEffectSpec(default=ActionEffect.MUTATE),
     )
     # pylint: disable-next=protected-access
     recall_history_python._tool_descriptor = descriptor  # type: ignore[attr-defined] # noqa: E501

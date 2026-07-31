@@ -227,6 +227,7 @@ def _format_matches(
     tool_type="file",
     target_param="path",
     pattern_param="pattern",
+    side_effect="read",
     policy_name="AstSearch",
     default_policy="allow",
     policy_reason="AST search (global)",

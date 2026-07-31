@@ -498,6 +498,7 @@ def _is_dangerous_self_kill(cmd: str) -> bool:
     async_execution=True,
     tool_type="shell",
     target_param="command",
+    side_effect="mutate",
     policy_name="Bash",
     ui_description="Execute shell commands",
     ui_icon="💻",

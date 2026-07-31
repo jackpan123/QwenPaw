@@ -503,6 +503,7 @@ def format_background_status_text(
 
 @tool_descriptor(
     async_execution=True,
+    side_effect="read",
     tool_type="internal",
     policy_name="ListAgents",
     ui_description="List configured agents from the local API",
@@ -526,6 +527,7 @@ async def list_agents(
     async_execution=True,
     tool_type="internal",
     target_param="to_agent",
+    side_effect="external_side_effect",
     policy_name="ChatWithAgent",
     ui_description=(
         "Send a message to another configured agent and wait for "
@@ -620,6 +622,7 @@ async def chat_with_agent(
     async_execution=True,
     tool_type="internal",
     target_param="to_agent",
+    side_effect="external_side_effect",
     policy_name="SubmitToAgent",
     ui_description="Submit a background task to another configured agent",
     ui_icon="📨",
@@ -711,6 +714,7 @@ async def submit_to_agent(
     async_execution=True,
     tool_type="internal",
     target_param="task_id",
+    side_effect="read",
     policy_name="CheckAgentTask",
     ui_description="Check the status of a background agent task",
     ui_icon="⏳",
@@ -1024,6 +1028,7 @@ def _build_subagent_request_context(
 
 @tool_descriptor(
     async_execution=True,
+    side_effect="external_side_effect",
     tool_type="internal",
     policy_name="SpawnSubagent",
     ui_description="Spawn an ephemeral sub-task within the current workspace",

@@ -14,6 +14,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
+from ..security.mutation_guard import ActionEffect
+
 if TYPE_CHECKING:
     from agentscope.message import Msg
 
@@ -32,6 +34,13 @@ class CommandSpec:
     ``category`` records the origin (``"daemon"`` / ``"control"`` /
     ``"conversation"`` / ``"skill"`` / ``"auto"`` / ``"user"``) so future
     introspection can group commands without re-parsing source.
+
+    ``effect`` is the command's :class:`ActionEffect` for the role-based
+    mutation gate. Defaults to UNKNOWN so unannotated commands are
+    fail-closed for non-privileged members (denied). READ /
+    CHAT_INFRASTRUCTURE commands run for members; MUTATE / UNKNOWN are
+    denied. The gate is a no-op when no authenticated principal is present
+    (local mode).
     """
 
     name: str
@@ -40,6 +49,7 @@ class CommandSpec:
     category: str = "user"
     help_text: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
+    effect: ActionEffect = ActionEffect.UNKNOWN
 
 
 class SlashCommandRegistry:
@@ -142,10 +152,23 @@ class SlashCommandRegistry:
         raw_text: str,
         ctx: "HookContext",
     ) -> "Msg | None":
-        """Resolve and execute. Returns ``None`` if nothing matched."""
+        """Resolve and execute. Returns ``None`` if nothing matched.
+
+        Before invoking a matched handler, the command's :attr:`CommandSpec.
+        effect` is authorized against the request principal (role-based
+        mutation gate). A guarded non-privileged member is denied
+        MUTATE / UNKNOWN commands (handler not invoked, deny Msg returned);
+        READ / CHAT_INFRASTRUCTURE commands run. The gate is a no-op when
+        there is no authenticated principal (local mode). The ``/<skill>``
+        fallback path is never gated — it is a chat entry whose tools are
+        still gated individually at execution time.
+        """
         match = self.resolve(raw_text)
         if match is not None:
             spec, args = match
+            deny = _authorize_command(ctx, spec)
+            if deny is not None:
+                return deny
             return await spec.handler(ctx, args)
         if (
             self._fallback is not None
@@ -154,6 +177,63 @@ class SlashCommandRegistry:
         ):
             return await self._fallback(raw_text, ctx)
         return None
+
+
+def _authorize_command(
+    ctx: "HookContext",
+    spec: "CommandSpec",
+) -> "Msg | None":
+    """Authorize ``spec.effect`` for the request principal.
+
+    Returns a deny :class:`Msg` (handler must NOT run) or ``None`` (allowed).
+    The principal is sourced ONLY from the server-derived
+    ``ctx.request.channel_meta["acl_principal"]`` — mirroring
+    :mod:`qwenpaw.runtime.builder` and the ContextVars setup hook — so a
+    client-forged identity can never reach this path. Absent principal
+    (local / unauthenticated) → ``authorize_effect`` already allows.
+    """
+    from ..config.utils import load_config
+    from ..security.mutation_guard import (
+        RequestPrincipal,
+        authorize_effect,
+    )
+
+    config = load_config().security.mutation_guard
+    request = getattr(ctx, "request", None)
+    channel_meta = getattr(request, "channel_meta", None)
+    acl_principal = (
+        channel_meta.get("acl_principal")
+        if isinstance(channel_meta, dict)
+        else None
+    )
+    principal = RequestPrincipal.from_context(acl_principal)
+    decision = authorize_effect(principal, spec.effect, config)
+    if decision.allowed:
+        return None
+    return _deny_msg(config.deny_message, decision.reason, spec.name)
+
+
+def _deny_msg(
+    deny_message: str,
+    reason: str,
+    command_name: str,
+) -> "Msg":
+    """Build the slash-command mutation-deny reply."""
+    from agentscope.message import Msg, TextBlock
+
+    return Msg(
+        name="assistant",
+        role="assistant",
+        content=[
+            TextBlock(
+                type="text",
+                text=(
+                    f"{deny_message} mutation_permission_denied "
+                    f"(command /{command_name}: {reason})"
+                ),
+            ),
+        ],
+    )
 
 
 __all__ = [
