@@ -6,7 +6,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
     from qwenpaw.config.config import MutationGuardConfig
@@ -54,22 +54,25 @@ class RequestPrincipal:
     @classmethod
     def from_context(
         cls,
-        context: dict[str, Any] | None,
+        context: object | None,
     ) -> "RequestPrincipal":
         """Build a principal from trusted context without broad coercion."""
-        if type(context) is not dict:
+        if context is None:
             return cls()
+        if type(context) is not dict:
+            return cls(guarded=True, can_mutate=False)
 
-        raw_roles = context.get("roles")
+        context_dict = cast(dict[str, Any], context)
+        raw_roles = context_dict.get("roles")
         if isinstance(raw_roles, (list, tuple)):
             roles = tuple(role for role in raw_roles if isinstance(role, str))
         else:
             roles = ()
 
-        user_id = context.get("user_id")
-        source = context.get("source")
-        guarded = context.get("guarded")
-        can_mutate = context.get("can_mutate")
+        user_id = context_dict.get("user_id")
+        source = context_dict.get("source")
+        guarded = context_dict.get("guarded")
+        can_mutate = context_dict.get("can_mutate")
         valid_flags = isinstance(guarded, bool) and isinstance(
             can_mutate,
             bool,

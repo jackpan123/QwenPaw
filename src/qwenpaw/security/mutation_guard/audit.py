@@ -31,33 +31,55 @@ _SENSITIVE_KEY_PARTS = (
     "token",
     "secret",
     "authorization",
-    "api_key",
     "apikey",
     "password",
     "passwd",
     "credential",
 )
 _SUMMARY_MAX_LENGTH = 256
-_BEARER_PATTERN = re.compile(
-    r"(?i)\bBearer\s+(?P<value>[^\s,;\"']+)",
+_KEY_PREFIX = r"(?:[a-z0-9]+[_-])*"
+_QUOTED_OR_TOKEN = (
+    r"(?:(?P<quote>[\"'])(?P<quoted>.*?)(?P=quote)"
+    r"|(?P<value>[^\s,;\"'}\]]+))"
+)
+_AUTHORIZATION_PATTERN = re.compile(
+    r"(?i)\b(?P<name>" + _KEY_PREFIX + r"authorization)"
+    r"(?P<separator>\s*[:=]\s*)"
+    r"(?:(?P<auth_quote>[\"'])(?P<auth_quoted>.*?)(?P=auth_quote)"
+    r"|(?:(?P<scheme>[a-z][a-z0-9+.-]*)\s+)?"
+    r"(?P<auth_value>[^\s,;\"'}\]]+))",
+)
+_AUTH_SCHEME_PATTERN = re.compile(
+    r"(?i)\b(?P<scheme>Bearer|Basic)\s+" + _QUOTED_OR_TOKEN,
 )
 _NAMED_CREDENTIAL_PATTERN = re.compile(
     r"(?i)\b(?P<name>"
-    r"token|secret|authorization|api[_-]?key|password|passwd|credential"
-    r")(?P<separator>\s*[:=]\s*)"
-    r"(?P<value>(?:Bearer\s+)?[^\s,;\"'}\]]+)",
+    + _KEY_PREFIX
+    + r"(?:token|secret|api[_-]?key|password|passwd|credential)"
+    r")(?P<separator>\s*[:=]\s*)" + _QUOTED_OR_TOKEN,
 )
 
 
 def _is_sensitive_key(key: str) -> bool:
-    normalized = key.casefold()
+    normalized = re.sub(r"[^a-z0-9]", "", key.casefold())
     return any(part in normalized for part in _SENSITIVE_KEY_PARTS)
 
 
+def _replace_named_credential(match: re.Match[str]) -> str:
+    return f"{match.group('name')}{match.group('separator')}" "[REDACTED]"
+
+
 def _scrub_text(value: str) -> str:
-    value = _BEARER_PATTERN.sub("Bearer [REDACTED]", value)
+    value = _AUTHORIZATION_PATTERN.sub(
+        _replace_named_credential,
+        value,
+    )
+    value = _AUTH_SCHEME_PATTERN.sub(
+        r"\g<scheme> [REDACTED]",
+        value,
+    )
     return _NAMED_CREDENTIAL_PATTERN.sub(
-        r"\g<name>\g<separator>[REDACTED]",
+        _replace_named_credential,
         value,
     )
 

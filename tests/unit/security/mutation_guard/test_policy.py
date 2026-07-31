@@ -158,19 +158,39 @@ def test_context_roles_string_is_not_split_into_characters():
     assert principal.can_mutate is False
 
 
-def test_context_rejects_non_builtin_dict_mapping():
-    principal = RequestPrincipal.from_context(
-        UserDict(
-            {
-                "user_id": "admin-1",
-                "roles": ["admin"],
-                "guarded": True,
-                "can_mutate": True,
-            },
+@pytest.mark.parametrize(
+    "context",
+    [
+        pytest.param(
+            UserDict(
+                {
+                    "user_id": "admin-1",
+                    "roles": ["admin"],
+                    "guarded": True,
+                    "can_mutate": True,
+                },
+            ),
+            id="user-dict",
         ),
+        pytest.param("invalid-context", id="string"),
+        pytest.param([], id="list"),
+        pytest.param(object(), id="object"),
+    ],
+)
+def test_non_builtin_dict_context_denies_mutation(context):
+    principal = RequestPrincipal.from_context(context)
+
+    decision = authorize_effect(
+        principal,
+        ActionEffect.MUTATE,
+        MutationGuardConfig(),
     )
 
-    assert principal == RequestPrincipal()
+    assert principal == RequestPrincipal(
+        guarded=True,
+        can_mutate=False,
+    )
+    assert decision.allowed is False
 
 
 def test_guarded_context_missing_can_mutate_fails_closed():
@@ -399,3 +419,48 @@ def test_audit_scrubs_credentials_from_all_free_text():
         assert secret not in rendered
     assert "keep-reason" in rendered
     assert "token documentation remains useful" in rendered
+
+
+@pytest.mark.parametrize(
+    ("credential_text", "secret"),
+    [
+        ('token="QUOTED-TOKEN"', "QUOTED-TOKEN"),
+        ("api_key='QUOTED-API-KEY'", "QUOTED-API-KEY"),
+        (
+            "authorization: Basic BASIC-CREDENTIAL",
+            "BASIC-CREDENTIAL",
+        ),
+        ("access_token=ACCESS-TOKEN", "ACCESS-TOKEN"),
+        ("client_secret=CLIENT-SECRET", "CLIENT-SECRET"),
+    ],
+)
+def test_audit_scrubs_specific_credential_syntax(
+    credential_text,
+    secret,
+):
+    with patch.object(audit_logger, "info") as mock_info:
+        emit_mutation_audit(
+            "authorization",
+            reason=f"before {credential_text} after",
+        )
+
+    rendered = _rendered_audit(mock_info)
+    assert secret not in rendered
+    assert "before" in rendered
+    assert "after" in rendered
+
+
+def test_audit_normalizes_hyphenated_sensitive_keys():
+    with patch.object(audit_logger, "info") as mock_info:
+        emit_mutation_audit(
+            "authorization",
+            summary={
+                "api-key": "STRUCTURED-API-KEY",
+                "safe": "visible",
+            },
+        )
+
+    rendered = _rendered_audit(mock_info)
+    assert "STRUCTURED-API-KEY" not in rendered
+    assert "[REDACTED]" in rendered
+    assert "visible" in rendered
