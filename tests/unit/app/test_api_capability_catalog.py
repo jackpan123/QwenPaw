@@ -3,25 +3,69 @@
 
 from __future__ import annotations
 
-from fastapi import FastAPI
-from fastapi.routing import APIRoute
+from collections.abc import Iterable, Iterator
+
+from starlette.routing import BaseRoute
 
 from qwenpaw.app.mutation_authorization import (
     default_capability_for_method,
 )
-from qwenpaw.app.routers import router as api_router
 from qwenpaw.security.mutation_guard import RouteCapability
 
 
-def _route_catalog() -> dict[tuple[str, str], APIRoute]:
-    app = FastAPI()
-    app.include_router(api_router, prefix="/api")
+def _iter_route_methods(
+    routes: Iterable[BaseRoute],
+    *,
+    prefix: str = "",
+) -> Iterator[tuple[str, str, BaseRoute]]:
+    for route in routes:
+        route_path = getattr(route, "path", "")
+        full_path = f"{prefix}{route_path}"
+        methods = getattr(route, "methods", None) or ()
+        for method in methods:
+            yield full_path, method, route
+
+        child_routes = getattr(route, "routes", None)
+        if child_routes is not None:
+            yield from _iter_route_methods(
+                child_routes,
+                prefix=full_path.rstrip("/"),
+            )
+
+
+def _production_app():
+    # Importing the module builds routes but does not enter the lifespan,
+    # so no workspace or other external service is started.
+    from qwenpaw.app._app import app
+
+    return app
+
+
+def _route_catalog() -> dict[tuple[str, str], BaseRoute]:
+    app = _production_app()
     return {
-        (route.path, method): route
-        for route in app.routes
-        if isinstance(route, APIRoute)
-        for method in route.methods
+        (path, method): route
+        for path, method, route in _iter_route_methods(app.routes)
     }
+
+
+def test_catalog_covers_every_production_route_method():
+    production_app = _production_app()
+
+    production_keys = {
+        (path, method)
+        for path, method, _route in _iter_route_methods(
+            production_app.routes,
+        )
+    }
+    catalog_keys = set(_route_catalog())
+
+    assert production_keys <= catalog_keys
+    assert {
+        ("/api/desktop/shutdown", "POST"),
+        ("/api/agents/{agentId}/console/chat", "POST"),
+        ("/voice/incoming", "POST"),
+    } <= catalog_keys
 
 
 def test_real_api_catalog_has_no_unknown_allow_state():
@@ -66,7 +110,7 @@ def test_required_non_mutating_routes_are_explicitly_cataloged():
 
 
 def test_production_middleware_order_provides_principal_before_guard():
-    from qwenpaw.app._app import app as production_app
+    production_app = _production_app()
 
     middleware_names = [
         middleware.cls.__name__

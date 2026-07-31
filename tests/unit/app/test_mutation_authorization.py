@@ -20,6 +20,7 @@ from qwenpaw.config.config import MutationGuardConfig
 from qwenpaw.security.mutation_guard import (
     RequestPrincipal,
     RouteCapability,
+    build_request_principal,
 )
 
 
@@ -29,13 +30,6 @@ MEMBER = RequestPrincipal(
     source="nocobase",
     guarded=True,
     can_mutate=False,
-)
-ADMIN = RequestPrincipal(
-    user_id="admin@example.com",
-    roles=("admin",),
-    source="nocobase",
-    guarded=True,
-    can_mutate=True,
 )
 LEGACY_EXTERNAL = RequestPrincipal(
     user_id="legacy@example.com",
@@ -50,6 +44,9 @@ def _build_client(
     principal: RequestPrincipal,
     *,
     enabled: bool = True,
+    deny_message: str = (
+        "Mutation denied.\nRead-only access remains available."
+    ),
     on_write: Callable[[], None] | None = None,
 ) -> TestClient:
     app = FastAPI()
@@ -83,7 +80,7 @@ def _build_client(
 
     config = MutationGuardConfig(
         enabled=enabled,
-        deny_message="Mutation denied.\nRead-only access remains available.",
+        deny_message=deny_message,
     )
     app.add_middleware(
         MutationAuthorizationMiddleware,
@@ -140,9 +137,20 @@ def test_undeclared_write_methods_default_to_mutate_and_deny_member(method):
 
 
 @pytest.mark.p0
-def test_privileged_principal_enters_write_handler():
-    response = _build_client(ADMIN).post("/default-write")
+@pytest.mark.parametrize("role", ["admin", "RoOt"])
+def test_privileged_roles_enter_write_handler(role):
+    config = MutationGuardConfig()
+    principal = build_request_principal(
+        user_id=f"{role}@example.com",
+        roles=[role],
+        source="nocobase",
+        auth_enabled=True,
+        config=config,
+    )
 
+    response = _build_client(principal).post("/default-write")
+
+    assert principal.can_mutate is True
     assert response.status_code == 200
     assert response.json() == {"entered": True}
 
@@ -177,6 +185,22 @@ def test_disabled_mutation_guard_allows_member_write():
 
     assert response.status_code == 200
     assert response.json() == {"entered": True}
+
+
+@pytest.mark.p0
+def test_default_chinese_deny_message_returns_only_first_sentence():
+    config = MutationGuardConfig()
+
+    response = _build_client(
+        MEMBER,
+        deny_message=config.deny_message,
+    ).post("/default-write")
+
+    assert response.status_code == 403
+    assert response.json() == {
+        "detail": "当前账号没有执行变更操作的权限",
+        "code": "mutation_permission_denied",
+    }
 
 
 @pytest.mark.p0

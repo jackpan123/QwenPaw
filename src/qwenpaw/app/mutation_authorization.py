@@ -78,9 +78,10 @@ def _load_principal(request: Request) -> RequestPrincipal:
 
 
 def _deny_detail(config: MutationGuardConfig) -> str:
-    paragraphs = config.deny_message.strip().splitlines()
-    first_paragraph = paragraphs[0].strip() if paragraphs else ""
-    return first_paragraph or "Mutation permission denied."
+    first_sentence = config.deny_message.strip().split("。", 1)[0]
+    lines = first_sentence.splitlines()
+    detail = lines[0].strip() if lines else ""
+    return detail or "Mutation permission denied."
 
 
 # pylint: disable-next=too-few-public-methods
