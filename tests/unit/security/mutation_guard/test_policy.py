@@ -417,7 +417,9 @@ def test_audit_scrubs_credentials_from_all_free_text():
     rendered = _rendered_audit(mock_info)
     for secret in secrets.values():
         assert secret not in rendered
-    assert "keep-reason" in rendered
+    payload = _audit_payload(mock_info)
+    assert payload["event"] == "[REDACTED]"
+    assert payload["reason"] == "[REDACTED]"
     assert "token documentation remains useful" in rendered
 
 
@@ -446,8 +448,7 @@ def test_audit_scrubs_specific_credential_syntax(
 
     rendered = _rendered_audit(mock_info)
     assert secret not in rendered
-    assert "before" in rendered
-    assert "after" in rendered
+    assert _audit_payload(mock_info)["reason"] == "[REDACTED]"
 
 
 def test_audit_normalizes_hyphenated_sensitive_keys():
@@ -464,3 +465,46 @@ def test_audit_normalizes_hyphenated_sensitive_keys():
     assert "STRUCTURED-API-KEY" not in rendered
     assert "[REDACTED]" in rendered
     assert "visible" in rendered
+
+
+@pytest.mark.parametrize(
+    ("credential_text", "secret"),
+    [
+        ('{"token": "JSON-TOKEN"}', "JSON-TOKEN"),
+        ("{'api_key': 'JSON-API-KEY'}", "JSON-API-KEY"),
+        (
+            'authorization: Bearer "QUOTED-BEARER"',
+            "QUOTED-BEARER",
+        ),
+    ],
+)
+def test_audit_redacts_entire_jsonish_credential_text(
+    credential_text,
+    secret,
+):
+    with patch.object(audit_logger, "info") as mock_info:
+        emit_mutation_audit(
+            "authorization",
+            reason=credential_text,
+        )
+
+    rendered = _rendered_audit(mock_info)
+    assert secret not in rendered
+    assert _audit_payload(mock_info)["reason"] == "[REDACTED]"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "token expired",
+        "how to rotate api keys safely",
+    ],
+)
+def test_audit_preserves_non_sensitive_explanations(text):
+    with patch.object(audit_logger, "info") as mock_info:
+        emit_mutation_audit(
+            "authorization",
+            reason=text,
+        )
+
+    assert _audit_payload(mock_info)["reason"] == text
