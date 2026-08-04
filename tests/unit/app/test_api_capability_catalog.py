@@ -3,9 +3,8 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Iterable, Iterator
-
-from starlette.routing import BaseRoute
 
 from qwenpaw.app.mutation_authorization import (
     default_capability_for_method,
@@ -14,11 +13,24 @@ from qwenpaw.security.mutation_guard import RouteCapability
 
 
 def _iter_route_methods(
-    routes: Iterable[BaseRoute],
+    routes: Iterable[object],
     *,
     prefix: str = "",
-) -> Iterator[tuple[str, str, BaseRoute]]:
+) -> Iterator[tuple[str, str, object]]:
     for route in routes:
+        effective_contexts = getattr(
+            route,
+            "effective_route_contexts",
+            None,
+        )
+        if callable(effective_contexts):
+            for context in effective_contexts():
+                path = getattr(context, "path", "")
+                methods = getattr(context, "methods", None) or ()
+                for method in methods:
+                    yield path, method, context
+            continue
+
         route_path = getattr(route, "path", "")
         full_path = f"{prefix}{route_path}"
         methods = getattr(route, "methods", None) or ()
@@ -41,31 +53,51 @@ def _production_app():
     return app
 
 
-def _route_catalog() -> dict[tuple[str, str], BaseRoute]:
+def _route_records() -> list[tuple[str, str, object]]:
     app = _production_app()
-    return {
-        (path, method): route
-        for path, method, route in _iter_route_methods(app.routes)
-    }
+    return list(_iter_route_methods(app.routes))
+
+
+def _route_catalog() -> dict[tuple[str, str], object]:
+    return {(path, method): route for path, method, route in _route_records()}
 
 
 def test_catalog_covers_every_production_route_method():
     production_app = _production_app()
-
-    production_keys = {
-        (path, method)
-        for path, method, _route in _iter_route_methods(
-            production_app.routes,
-        )
-    }
     catalog_keys = set(_route_catalog())
 
-    assert production_keys <= catalog_keys
+    runtime_effective_keys: set[tuple[str, str]] = set()
+    for route in production_app.routes:
+        effective_contexts = getattr(
+            route,
+            "effective_route_contexts",
+            None,
+        )
+        if not callable(effective_contexts):
+            continue
+        for context in effective_contexts():
+            path = getattr(context, "path", "")
+            methods = getattr(context, "methods", None) or ()
+            runtime_effective_keys.update((path, method) for method in methods)
+
+    if runtime_effective_keys:
+        assert runtime_effective_keys <= catalog_keys
+    assert len(catalog_keys) >= 100
     assert {
+        ("/api/auth/login", "POST"),
         ("/api/desktop/shutdown", "POST"),
         ("/api/agents/{agentId}/console/chat", "POST"),
         ("/voice/incoming", "POST"),
     } <= catalog_keys
+
+
+def test_catalog_has_no_duplicate_path_method_registrations():
+    counts = Counter(
+        (path, method) for path, method, _route in _route_records()
+    )
+    duplicates = sorted(key for key, count in counts.items() if count > 1)
+
+    assert duplicates == []
 
 
 def test_real_api_catalog_has_no_unknown_allow_state():

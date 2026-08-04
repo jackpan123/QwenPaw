@@ -411,6 +411,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         if self._should_skip_auth(request):
+            request.state.request_principal = RequestPrincipal()
             return await call_next(request)
 
         identity = await _resolve_external_identity(request)

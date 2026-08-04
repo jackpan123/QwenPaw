@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Iterator
 from typing import TypeVar
 
 from fastapi import Request, Response
@@ -48,12 +48,43 @@ def default_capability_for_method(method: str) -> RouteCapability:
     return RouteCapability.MUTATE
 
 
-def resolve_route_capability(request: Request) -> RouteCapability:
-    """Resolve a route declaration, falling back safely by HTTP method."""
-    for route in request.app.routes:
-        match, _ = route.matches(request.scope)
+def _iter_effective_routes(routes: Iterable[object]) -> Iterator[object]:
+    """Yield matchable routes across flat and deferred FastAPI catalogs."""
+    for route in routes:
+        effective_contexts = getattr(
+            route,
+            "effective_route_contexts",
+            None,
+        )
+        if callable(effective_contexts):
+            yield from effective_contexts()
+        else:
+            yield route
+
+
+def _route_template(route: object, fallback: str) -> str:
+    path = getattr(route, "path", None)
+    return path if isinstance(path, str) and path else fallback
+
+
+def _resolve_route_capability(
+    request: Request,
+) -> tuple[RouteCapability, str]:
+    """Resolve capability and safe route template for one request."""
+    partial_template: str | None = None
+    for route in _iter_effective_routes(request.app.routes):
+        matches = getattr(route, "matches", None)
+        if not callable(matches):
+            continue
+        match, _ = matches(request.scope)
+        if match is Match.PARTIAL:
+            if partial_template is None:
+                partial_template = _route_template(route, "<matched>")
+            continue
         if match is not Match.FULL:
             continue
+
+        route_template = _route_template(route, "<matched>")
         endpoint = getattr(route, "endpoint", None)
         declared = getattr(
             endpoint,
@@ -61,9 +92,19 @@ def resolve_route_capability(request: Request) -> RouteCapability:
             None,
         )
         if isinstance(declared, RouteCapability):
-            return declared
-        break
-    return default_capability_for_method(request.method)
+            return declared, route_template
+        return default_capability_for_method(request.method), route_template
+
+    return (
+        default_capability_for_method(request.method),
+        partial_template or "<unmatched>",
+    )
+
+
+def resolve_route_capability(request: Request) -> RouteCapability:
+    """Resolve a route declaration, falling back safely by HTTP method."""
+    capability, _ = _resolve_route_capability(request)
+    return capability
 
 
 def _load_config() -> MutationGuardConfig:
@@ -74,7 +115,7 @@ def _load_principal(request: Request) -> RequestPrincipal:
     principal = getattr(request.state, "request_principal", None)
     if isinstance(principal, RequestPrincipal):
         return principal
-    return RequestPrincipal()
+    return RequestPrincipal(guarded=True, can_mutate=False)
 
 
 def _deny_detail(config: MutationGuardConfig) -> str:
@@ -110,7 +151,7 @@ class MutationAuthorizationMiddleware(BaseHTTPMiddleware):
         if not config.enabled or not principal.guarded or principal.can_mutate:
             return await call_next(request)
 
-        capability = resolve_route_capability(request)
+        capability, route_template = _resolve_route_capability(request)
         if capability is not RouteCapability.MUTATE:
             return await call_next(request)
 
@@ -119,7 +160,7 @@ class MutationAuthorizationMiddleware(BaseHTTPMiddleware):
             user_id=principal.user_id,
             roles=principal.roles,
             source=principal.source,
-            route=f"{request.method} {request.url.path}",
+            route=f"{request.method} {route_template}",
             decision="deny",
             reason="mutation_permission_denied",
         )

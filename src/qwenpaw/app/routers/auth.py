@@ -16,7 +16,7 @@ from ..auth import (
 )
 from ..mutation_authorization import api_capability
 from ..rate_limiter import rate_limiter
-from ...security.mutation_guard import RouteCapability
+from ...security.mutation_guard import RequestPrincipal, RouteCapability
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -112,7 +112,11 @@ async def verify(request: Request):
             "can_mutate": True,
         }
     principal = getattr(request.state, "request_principal", None)
-    if principal is None:
+    if (
+        not isinstance(principal, RequestPrincipal)
+        or not principal.user_id
+        or not principal.source
+    ):
         identity = await resolve_external_identity(request)
         if identity is None:
             raise HTTPException(
