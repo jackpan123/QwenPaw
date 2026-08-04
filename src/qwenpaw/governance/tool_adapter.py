@@ -491,7 +491,7 @@ async def _policy_tool_call(
     if _is_mutation_guard_denial(result):
         return result
 
-    if not _is_sandbox_denial(result):
+    if not _is_explicit_sandbox_violation(result, invocation):
         return result
 
     return await _resolve_sandbox_violation(
@@ -512,14 +512,25 @@ def _is_mutation_guard_denial(result: Any) -> bool:
     )
 
 
-def _is_sandbox_denial(result: Any) -> bool:
-    """Return whether a result should enter sandbox approval fallback."""
+def _is_explicit_sandbox_violation(
+    result: Any,
+    invocation: _PolicyInvocationState,
+) -> bool:
+    """Return whether active sandbox execution emitted its stable marker."""
     from agentscope.message import ToolResultState
 
+    metadata = getattr(result, "metadata", None)
+    marker = (
+        metadata.get("sandbox_violation")
+        if isinstance(metadata, dict)
+        else None
+    )
     return (
-        isinstance(result, ToolChunk)
+        invocation.sandbox_mode
+        and isinstance(result, ToolChunk)
         and result.state == ToolResultState.DENIED
-        and not _is_mutation_guard_denial(result)
+        and isinstance(marker, str)
+        and bool(marker.strip())
     )
 
 
@@ -530,10 +541,14 @@ async def _policy_tool_stream(
     kwargs: dict[str, Any],
     request_context: dict[str, str],
 ) -> AsyncGenerator[Any, None]:
-    """Preserve streamed chunks while handling an embedded sandbox denial."""
-    buffered: list[Any] = []
+    """Stream in O(1) space and handle a leading sandbox violation."""
+    emitted = False
     async for chunk in stream:
-        if _is_sandbox_denial(chunk):
+        if _is_explicit_sandbox_violation(chunk, invocation):
+            if emitted:
+                _audit_sandbox_retry_suppressed(self, chunk, invocation)
+                yield chunk
+                return
             resolved = await _resolve_sandbox_violation(
                 self,
                 chunk,
@@ -547,10 +562,57 @@ async def _policy_tool_stream(
             else:
                 yield resolved
             return
-        buffered.append(chunk)
-
-    for chunk in buffered:
         yield chunk
+        emitted = True
+
+
+def _sandbox_violation_message(result: ToolChunk) -> str:
+    """Extract the stable sandbox violation detail for logs and prompts."""
+    violation_msg = ""
+    if isinstance(result.metadata, dict):
+        marker = result.metadata.get("sandbox_violation", "")
+        if isinstance(marker, str):
+            violation_msg = marker
+    if violation_msg:
+        return violation_msg
+
+    for block in result.content or []:
+        text = getattr(block, "text", "")
+        if "Sandbox violation:" in text:
+            return (
+                text.split("Sandbox violation:", 1)[1].split("\n")[0].strip()
+            )
+    return ""
+
+
+def _audit_sandbox_retry_suppressed(
+    self: Any,
+    result: ToolChunk,
+    invocation: _PolicyInvocationState,
+) -> None:
+    """Audit a late violation that cannot be retried without duplication."""
+    violation_msg = _sandbox_violation_message(result)
+    logger.warning(
+        "PolicyGuardedTool: sandbox violation after streamed output for "
+        "'%s'; retry suppressed",
+        getattr(self, "name", "Unknown"),
+    )
+    governor = getattr(self, "_qp_governor", None)
+    if governor is None:
+        return
+    tc_spec = invocation.tc_spec or self._build_tc_spec(
+        invocation.raw_params,
+    )
+    governor.audit(
+        tc_spec,
+        GovernanceDecision(
+            action=GovernanceAction.DENY,
+            reason=(
+                f"sandbox violation after streamed output: "
+                f"{violation_msg}; retry suppressed"
+            ),
+        ),
+    )
 
 
 async def _resolve_sandbox_violation(
@@ -563,20 +625,7 @@ async def _resolve_sandbox_violation(
     """Ask once for a sandbox denial and optionally retry unsandboxed."""
     from agentscope.message import ToolResultState
 
-    # Extract violation message from metadata or content
-    violation_msg = ""
-    if hasattr(result, "metadata") and result.metadata:
-        violation_msg = result.metadata.get("sandbox_violation", "")
-    if not violation_msg:
-        # Fallback: extract from content text
-        for block in result.content or []:
-            if hasattr(block, "text") and "Sandbox violation:" in block.text:
-                violation_msg = (
-                    block.text.split("Sandbox violation:", 1)[1]
-                    .split("\n")[0]
-                    .strip()
-                )
-                break
+    violation_msg = _sandbox_violation_message(result)
 
     logger.info(
         "PolicyGuardedTool: sandbox violation for '%s': %s",

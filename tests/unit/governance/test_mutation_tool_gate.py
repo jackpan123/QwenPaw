@@ -648,6 +648,209 @@ async def test_policy_invocation_state_is_isolated_between_concurrent_calls(
     assert received == {"safe": None, "sandbox": sandbox}
 
 
+@pytest.mark.asyncio
+async def test_policy_stream_yields_first_chunk_without_waiting_for_second(
+    monkeypatch,
+) -> None:
+    _patch_mutation_guard(monkeypatch)
+    continue_stream = asyncio.Event()
+
+    async def operation():
+        yield ToolChunk(content=[TextBlock(text="first")])
+        await continue_stream.wait()
+        yield ToolChunk(content=[TextBlock(text="second")])
+
+    tool = PolicyGuardedTool(
+        operation,
+        request_context=_admin_request_context(),
+        effect_spec=ToolEffectSpec(default=ActionEffect.READ),
+    )
+    stream = await tool()
+
+    first = await asyncio.wait_for(anext(stream), timeout=0.2)
+    assert _tool_text(first) == "first"
+
+    continue_stream.set()
+    second = await asyncio.wait_for(anext(stream), timeout=0.2)
+    assert _tool_text(second) == "second"
+    with pytest.raises(StopAsyncIteration):
+        await anext(stream)
+
+
+@pytest.mark.asyncio
+async def test_policy_stream_does_not_read_ahead_or_buffer_long_stream(
+    monkeypatch,
+) -> None:
+    _patch_mutation_guard(monkeypatch)
+    produced = 0
+
+    async def operation():
+        nonlocal produced
+        for index in range(10_000):
+            produced += 1
+            yield ToolChunk(content=[TextBlock(text=str(index))])
+
+    tool = PolicyGuardedTool(
+        operation,
+        request_context=_admin_request_context(),
+        effect_spec=ToolEffectSpec(default=ActionEffect.READ),
+    )
+    stream = await tool()
+
+    first = await anext(stream)
+
+    assert _tool_text(first) == "0"
+    assert produced == 1
+    await stream.aclose()
+
+
+@pytest.mark.parametrize(
+    ("sandbox_mode", "metadata"),
+    [
+        (True, {"business_denial": "quota"}),
+        (False, {"sandbox_violation": "not from sandbox execution"}),
+    ],
+)
+@pytest.mark.asyncio
+async def test_stream_denial_without_active_explicit_sandbox_does_not_ask(
+    monkeypatch,
+    sandbox_mode,
+    metadata,
+) -> None:
+    from agentscope.permission import PermissionBehavior, PermissionDecision
+    from qwenpaw.governance.policy import (
+        GovernanceAction,
+        GovernanceDecision,
+    )
+
+    _patch_mutation_guard(monkeypatch)
+    sandbox = object()
+    approvals = 0
+    calls = 0
+
+    class Governor:
+        workspace_dir = "/tmp"
+
+        @staticmethod
+        def assert_policy(_spec):
+            if sandbox_mode:
+                return GovernanceDecision(
+                    GovernanceAction.SANDBOX_FALLBACK,
+                    "sandbox",
+                    sandbox_config=sandbox,
+                )
+            return GovernanceDecision(GovernanceAction.ALLOW, "allowed")
+
+        @staticmethod
+        def audit(*_args, **_kwargs):
+            return None
+
+    async def operation(sandbox_config=None):
+        nonlocal calls
+        calls += 1
+        yield ToolChunk(
+            state=ToolResultState.DENIED,
+            metadata=metadata,
+            content=[TextBlock(text="ordinary denial")],
+        )
+
+    async def approve(**_kwargs):
+        nonlocal approvals
+        approvals += 1
+        return PermissionDecision(
+            behavior=PermissionBehavior.ALLOW,
+            message="approved",
+        )
+
+    monkeypatch.setattr(tool_adapter, "_ask_user_approval", approve)
+    tool = PolicyGuardedTool(
+        operation,
+        governor=Governor(),
+        request_context=_admin_request_context(),
+        effect_spec=ToolEffectSpec(default=ActionEffect.MUTATE),
+    )
+    permission = await tool.check_permissions({})
+    assert permission.behavior is PermissionBehavior.ALLOW
+
+    stream = await tool()
+    chunks = [chunk async for chunk in stream]
+
+    assert approvals == 0
+    assert calls == 1
+    assert chunks[0].state is ToolResultState.DENIED
+
+
+@pytest.mark.asyncio
+async def test_late_streamed_sandbox_denial_never_retries_side_effects(
+    monkeypatch,
+) -> None:
+    from qwenpaw.governance.policy import (
+        GovernanceAction,
+        GovernanceDecision,
+    )
+
+    _patch_mutation_guard(monkeypatch)
+    sandbox = object()
+    approvals = 0
+    calls = 0
+    audits = []
+
+    class Governor:
+        workspace_dir = "/tmp"
+
+        @staticmethod
+        def assert_policy(_spec):
+            return GovernanceDecision(
+                GovernanceAction.SANDBOX_FALLBACK,
+                "sandbox",
+                sandbox_config=sandbox,
+            )
+
+        @staticmethod
+        def audit(spec, decision):
+            audits.append((spec, decision))
+
+    async def operation(sandbox_config=None):
+        nonlocal calls
+        calls += 1
+        yield ToolChunk(content=[TextBlock(text="already emitted")])
+        yield ToolChunk(
+            state=ToolResultState.DENIED,
+            metadata={"sandbox_violation": "late block"},
+            content=[TextBlock(text="Sandbox violation: late block")],
+        )
+
+    async def unexpected_approval(**_kwargs):
+        nonlocal approvals
+        approvals += 1
+        raise AssertionError("late sandbox denial must not ask or retry")
+
+    monkeypatch.setattr(
+        tool_adapter,
+        "_ask_user_approval",
+        unexpected_approval,
+    )
+    tool = PolicyGuardedTool(
+        operation,
+        governor=Governor(),
+        request_context=_admin_request_context(),
+        effect_spec=ToolEffectSpec(default=ActionEffect.MUTATE),
+    )
+    await tool.check_permissions({})
+
+    stream = await tool()
+    first = await anext(stream)
+    remaining = [chunk async for chunk in stream]
+
+    assert _tool_text(first) == "already emitted"
+    assert approvals == 0
+    assert calls == 1
+    assert len(remaining) == 1
+    assert remaining[0].state is ToolResultState.DENIED
+    assert audits[-1][1].action is GovernanceAction.DENY
+    assert "retry suppressed" in audits[-1][1].reason
+
+
 @pytest.mark.parametrize("approved", [True, False])
 @pytest.mark.asyncio
 async def test_middleware_stream_handles_sandbox_violation_and_retry(
@@ -898,10 +1101,7 @@ async def test_rejected_ask_clears_state_and_direct_call_cannot_consume_it(
 
     await tool(value="fresh")
 
-    assert captured_params == [
-        {"value": "stale-secret"},
-        {"value": "fresh"},
-    ]
+    assert captured_params == [{"value": "stale-secret"}]
 
 
 @pytest.mark.parametrize("failure", ["error", "cancel"])
@@ -949,12 +1149,17 @@ async def test_permission_exception_or_cancel_clears_invocation_state(
 @pytest.mark.asyncio
 async def test_sandbox_retry_reauthorizes_before_second_execution(monkeypatch):
     from agentscope.permission import PermissionBehavior, PermissionDecision
+    from qwenpaw.governance.policy import (
+        GovernanceAction,
+        GovernanceDecision,
+    )
 
     _patch_mutation_guard(monkeypatch)
     calls = 0
     request_context = _admin_request_context()
 
-    async def sandboxed_mutation() -> ToolChunk:
+    async def sandboxed_mutation(sandbox_config=None) -> ToolChunk:
+        del sandbox_config
         nonlocal calls
         calls += 1
         return ToolChunk(
@@ -963,13 +1168,26 @@ async def test_sandbox_retry_reauthorizes_before_second_execution(monkeypatch):
             content=[TextBlock(text="Sandbox violation: blocked")],
         )
 
-    governor = SimpleNamespace(
-        workspace_dir="/tmp",
-        audit=lambda *_args, **_kwargs: None,
-    )
+    sandbox = object()
+
+    class Governor:
+        workspace_dir = "/tmp"
+
+        @staticmethod
+        def assert_policy(_spec):
+            return GovernanceDecision(
+                GovernanceAction.SANDBOX_FALLBACK,
+                "sandbox",
+                sandbox_config=sandbox,
+            )
+
+        @staticmethod
+        def audit(*_args, **_kwargs):
+            return None
+
     tool = PolicyGuardedTool(
         sandboxed_mutation,
-        governor=governor,
+        governor=Governor(),
         request_context=request_context,
         effect_spec=ToolEffectSpec(default=ActionEffect.MUTATE),
     )
@@ -987,6 +1205,8 @@ async def test_sandbox_retry_reauthorizes_before_second_execution(monkeypatch):
         tool_adapter, "_ask_user_approval", approve_then_remove_privilege
     )
 
+    permission = await tool.check_permissions({})
+    assert permission.behavior is PermissionBehavior.ALLOW
     result = await tool()
 
     assert calls == 1
