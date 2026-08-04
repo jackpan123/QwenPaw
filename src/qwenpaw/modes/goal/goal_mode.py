@@ -9,6 +9,7 @@ Inherits ``AgentMode`` so it plugs into the standard
 ``builtin_mode_clses`` bootstrap — all registration
 stays inside this file and ``modes/goal/``.
 """
+
 from __future__ import annotations
 
 import logging
@@ -31,6 +32,7 @@ from ...runtime.hooks import HookBase, HookContext
 from ...runtime.slash_command_registry import (
     CommandSpec,
 )
+from ...security.mutation_guard import ActionEffect
 from .gates import GoalBudgetGate, GoalTurnGate, RubricGate
 from .helpers import (
     create_completion_gate,
@@ -164,6 +166,7 @@ class GoalMode(AgentMode):
                 category="builtin",
                 help_text=("Set a goal \u2014 agent works " "until done."),
                 metadata={"builtin": True},
+                effect=ActionEffect.MUTATE,
             ),
         ]
 
@@ -173,7 +176,6 @@ class GoalMode(AgentMode):
             ToolDescriptor,
             ToolEffectSpec,
         )
-        from ...security.mutation_guard import ActionEffect
         from .tools import (
             make_create_goal,
             make_get_goal,

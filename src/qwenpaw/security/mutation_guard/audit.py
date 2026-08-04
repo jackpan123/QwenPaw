@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 _ALLOWED_FIELDS = frozenset(
     {
         "user_id",
+        "user",
         "roles",
         "source",
         "agent",
@@ -23,6 +24,8 @@ _ALLOWED_FIELDS = frozenset(
         "channel",
         "route",
         "tool",
+        "command",
+        "effect",
         "decision",
         "reason",
         "summary",

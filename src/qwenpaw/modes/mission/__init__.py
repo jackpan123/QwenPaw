@@ -21,6 +21,7 @@ from agentscope.message import Msg, TextBlock
 from ..base import AgentMode, find_active_explicit_mode
 from ...runtime.hooks import HookBase, HookContext
 from ...runtime.slash_command_registry import CommandSpec
+from ...security.mutation_guard import ActionEffect
 
 if TYPE_CHECKING:
     from typing import Any
@@ -57,6 +58,7 @@ class MissionMode(AgentMode):
                 category="builtin",
                 help_text=MISSION_HELP_TEXT,
                 metadata={"builtin": True},
+                effect=ActionEffect.MUTATE,
             ),
         ]
 

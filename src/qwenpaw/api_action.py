@@ -40,6 +40,7 @@ class ApiActionSpec:
     slash_command: str | None = None
     request_model: type | None = None
     response_model: type | None = None
+    side_effect: str = "unknown"
 
 
 def api_action(
@@ -51,6 +52,7 @@ def api_action(
     slash_command: str | None = None,
     request_model: type | None = None,
     response_model: type | None = None,
+    side_effect: str = "unknown",
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Attach an :class:`ApiActionSpec` to ``fn._api_action``.
 
@@ -78,6 +80,7 @@ def api_action(
             slash_command=slash_command,
             request_model=request_model,
             response_model=response_model,
+            side_effect=side_effect,
         )
         return fn
 

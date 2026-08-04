@@ -38,7 +38,8 @@ _DAEMON_EFFECTS: dict[str, ActionEffect] = {
     "daemon": ActionEffect.MUTATE,
 }
 # Control commands. /approval defaults to the "approve" action (resolves a
-# pending approval -> mutates state), so it is fail-closed for members.
+# pending approval -> mutates state); its read-only actions are resolved per
+# invocation by ``_resolve_approval_effect`` below.
 _CONTROL_EFFECTS: dict[str, ActionEffect] = {
     "approval": ActionEffect.MUTATE,
     "approve": ActionEffect.MUTATE,
@@ -208,6 +209,17 @@ def _collect_daemon_specs() -> list[CommandSpec]:
 # ======================================================================
 
 
+def _resolve_approval_effect(args: str) -> ActionEffect:
+    """Classify one compound ``/approval`` invocation."""
+    stripped = args.strip()
+    action = stripped.split(None, 1)[0].casefold() if stripped else "approve"
+    if action in {"list", "status", "read"}:
+        return ActionEffect.READ
+    if action in {"approve", "deny", "cancel"}:
+        return ActionEffect.MUTATE
+    return ActionEffect.UNKNOWN
+
+
 def _make_control_adapter(
     handler: Any,
     command_name: str,
@@ -291,6 +303,9 @@ def _make_control_adapter(
         effect=_CONTROL_EFFECTS.get(
             command_name,
             ActionEffect.UNKNOWN,
+        ),
+        effect_resolver=(
+            _resolve_approval_effect if command_name == "approval" else None
         ),
     )
 

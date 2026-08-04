@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """Runtime modes compiled from saved gate pipelines."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -11,6 +12,7 @@ from ...loop.compiler import compile_loop_mode
 from ...loop.gates import StopHandler, StopHandlerRegistration
 from ...runtime.hooks import HookContext
 from ...runtime.slash_command_registry import CommandSpec
+from ...security.mutation_guard import ActionEffect
 from ..base import AgentMode
 from ..base import find_active_explicit_mode
 
@@ -172,6 +174,7 @@ class CustomLoopController(AgentMode):
                 handler=self._mode_handler,
                 category="custom_loop",
                 help_text="Disable the active custom loop mode.",
+                effect=ActionEffect.MUTATE,
             ),
         ]
 

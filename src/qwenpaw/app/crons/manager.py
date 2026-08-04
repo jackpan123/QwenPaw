@@ -179,6 +179,7 @@ class CronManager(ManagerBase):
         http_method="GET",
         http_path="/crons/jobs",
         slash_command="cron-list",
+        side_effect="read",
     )
     async def list_jobs(self) -> list[CronJobSpec]:
         return await self._repo.list_jobs()
@@ -202,6 +203,7 @@ class CronManager(ManagerBase):
         http_path="/crons/jobs",
         request_model=CronJobSpec,
         slash_command="cron-create",
+        side_effect="mutate",
     )
     async def create_or_replace_job(self, spec: CronJobSpec) -> None:
         async with self._lock:
@@ -214,6 +216,7 @@ class CronManager(ManagerBase):
         http_method="DELETE",
         http_path="/crons/jobs/{job_id}",
         slash_command="cron-delete",
+        side_effect="mutate",
     )
     async def delete_job(self, job_id: str) -> bool:
         async with self._lock:

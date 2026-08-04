@@ -24,6 +24,7 @@ if TYPE_CHECKING:
 
 CommandHandler = Callable[["HookContext", str], Awaitable["Msg | None"]]
 FallbackHandler = Callable[[str, "HookContext"], Awaitable["Msg | None"]]
+CommandEffectResolver = Callable[[str], ActionEffect]
 
 
 @dataclass(frozen=True)
@@ -35,12 +36,11 @@ class CommandSpec:
     ``"conversation"`` / ``"skill"`` / ``"auto"`` / ``"user"``) so future
     introspection can group commands without re-parsing source.
 
-    ``effect`` is the command's :class:`ActionEffect` for the role-based
-    mutation gate. Defaults to UNKNOWN so unannotated commands are
-    fail-closed for non-privileged members (denied). READ /
-    CHAT_INFRASTRUCTURE commands run for members; MUTATE / UNKNOWN are
-    denied. The gate is a no-op when no authenticated principal is present
-    (local mode).
+    ``effect`` is the command's default :class:`ActionEffect` for the
+    role-based mutation gate. ``effect_resolver``, when provided, derives
+    the effect from the raw argument string for compound commands. Resolver
+    failures and invalid return values fail closed as UNKNOWN. Unannotated
+    commands also default to UNKNOWN.
     """
 
     name: str
@@ -50,6 +50,19 @@ class CommandSpec:
     help_text: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
     effect: ActionEffect = ActionEffect.UNKNOWN
+    effect_resolver: CommandEffectResolver | None = None
+
+    def resolve_effect(self, args: str) -> ActionEffect:
+        """Return the effect for one invocation, failing closed."""
+        if self.effect_resolver is None:
+            return self.effect
+        try:
+            resolved = self.effect_resolver(args)
+        except Exception:  # noqa: BLE001 -- authorization must fail closed
+            return ActionEffect.UNKNOWN
+        if not isinstance(resolved, ActionEffect):
+            return ActionEffect.UNKNOWN
+        return resolved
 
 
 class SlashCommandRegistry:
@@ -166,7 +179,8 @@ class SlashCommandRegistry:
         match = self.resolve(raw_text)
         if match is not None:
             spec, args = match
-            deny = _authorize_command(ctx, spec)
+            effect = spec.resolve_effect(args)
+            deny = _authorize_command(ctx, spec, effect)
             if deny is not None:
                 return deny
             return await spec.handler(ctx, args)
@@ -182,8 +196,9 @@ class SlashCommandRegistry:
 def _authorize_command(
     ctx: "HookContext",
     spec: "CommandSpec",
+    effect: ActionEffect,
 ) -> "Msg | None":
-    """Authorize ``spec.effect`` for the request principal.
+    """Authorize the resolved effect for the request principal.
 
     Returns a deny :class:`Msg` (handler must NOT run) or ``None`` (allowed).
     The principal is sourced ONLY from the server-derived
@@ -196,6 +211,7 @@ def _authorize_command(
     from ..security.mutation_guard import (
         RequestPrincipal,
         authorize_effect,
+        emit_mutation_audit,
     )
 
     config = load_config().security.mutation_guard
@@ -207,9 +223,22 @@ def _authorize_command(
         else None
     )
     principal = RequestPrincipal.from_context(acl_principal)
-    decision = authorize_effect(principal, spec.effect, config)
+    decision = authorize_effect(principal, effect, config)
     if decision.allowed:
         return None
+    emit_mutation_audit(
+        "slash_command_denied",
+        decision="deny",
+        user=principal.user_id,
+        roles=principal.roles,
+        source=principal.source,
+        agent=getattr(ctx, "agent_id", "") or "",
+        session=getattr(ctx, "session_id", "") or "",
+        channel=getattr(request, "channel", "") or "",
+        command=spec.name,
+        effect=effect.value,
+        reason=decision.reason,
+    )
     return _deny_msg(config.deny_message, decision.reason, spec.name)
 
 
@@ -237,6 +266,7 @@ def _deny_msg(
 
 
 __all__ = [
+    "CommandEffectResolver",
     "CommandHandler",
     "CommandSpec",
     "FallbackHandler",
