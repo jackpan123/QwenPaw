@@ -15,6 +15,7 @@ from ...runtime.hooks import HookAction, HookContext, HookResult
 from ...runtime.phases import Phase
 from ...security.mutation_guard import RequestPrincipal, emit_mutation_audit
 from ...security.mutation_guard.intent import (
+    MAX_CURRENT_MESSAGE_CHARS,
     IntentKind,
     IntentResult,
     bound_recent_context,
@@ -64,13 +65,13 @@ def _message_text(message: Any) -> str:
 def _current_user_text(ctx: HookContext) -> str:
     for message in reversed(ctx.input_msgs or []):
         if _value(message, "role") == "user":
-            return _message_text(message).strip()
+            return _message_text(message)
 
     request_input = _value(ctx.request, "input", [])
     if isinstance(request_input, list):
         for message in reversed(request_input):
             if _value(message, "role") == "user":
-                return _message_text(message).strip()
+                return _message_text(message)
     return ""
 
 
@@ -148,8 +149,15 @@ class MutationIntentHook(LifecycleHook):
             return HookResult()
 
         current_text = _current_user_text(ctx)
-        if not current_text:
+        if not current_text.strip():
             return HookResult()
+        if len(current_text) > MAX_CURRENT_MESSAGE_CHARS:
+            return self._degrade(
+                ctx,
+                principal,
+                reason="message_too_long",
+            )
+        current_text = current_text.strip()
 
         try:
             raw_result = await asyncio.wait_for(

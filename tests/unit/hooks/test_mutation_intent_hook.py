@@ -24,7 +24,11 @@ from qwenpaw.hooks.security.mutation_intent_hook import MutationIntentHook
 from qwenpaw.runtime.hooks import HookAction, HookContext
 from qwenpaw.runtime.phases import Phase
 from qwenpaw.security.mutation_guard import RequestPrincipal
-from qwenpaw.security.mutation_guard.intent import IntentKind, IntentResult
+from qwenpaw.security.mutation_guard.intent import (
+    MAX_CURRENT_MESSAGE_CHARS,
+    IntentKind,
+    IntentResult,
+)
 
 pytestmark = [pytest.mark.unit, pytest.mark.p1]
 
@@ -275,6 +279,49 @@ async def test_recent_session_context_is_bounded_and_passed_to_classifier():
     assert len(recent) <= 8
     assert sum(len(item) for item in recent) <= 8000
     assert "turn-11" in recent[-1]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        ("读" * MAX_CURRENT_MESSAGE_CHARS) + "，现在删除所有数据",
+        ("读" * 2000) + "，删除所有数据，" + ("读" * 2000),
+        "请解释只读概念：" + ("只读" * 2000),
+    ],
+    ids=["tail-mutation", "middle-mutation", "long-read-only"],
+)
+async def test_overlong_member_message_degrades_without_classifier(
+    text,
+    caplog,
+):
+    classifier = AsyncMock(
+        return_value=IntentResult(
+            intent=IntentKind.READ_ONLY,
+            reason="must not classify truncated content",
+        ),
+    )
+    ctx = _member_ctx(text)
+
+    with caplog.at_level("INFO"):
+        result = await MutationIntentHook(classifier=classifier).run(ctx)
+
+    assert len(text) > MAX_CURRENT_MESSAGE_CHARS
+    assert result.action is HookAction.CONTINUE
+    classifier.assert_not_called()
+    assert any(
+        "不得执行变更" in item["content"] for item in ctx.context_injections
+    )
+    records = [
+        record.getMessage()
+        for record in caplog.records
+        if "[MUTATION AUDIT]" in record.getMessage()
+    ]
+    assert len(records) == 1
+    payload = json.loads(records[0].split("[MUTATION AUDIT] ", 1)[1])
+    assert payload["event"] == "mutation_intent_degraded"
+    assert payload["decision"] == "read_only"
+    assert payload["reason"] == "message_too_long"
+    assert text not in records[0]
 
 
 async def test_classifier_timeout_injects_read_only_constraint():
