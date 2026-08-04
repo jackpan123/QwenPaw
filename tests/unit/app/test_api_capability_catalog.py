@@ -62,6 +62,7 @@ def _materialize_lifespan_api_action_routes():
 
     production_app = _production_app()
     original_routes = list(production_app.routes)
+    original_middleware_stack = production_app.middleware_stack
     existing_cron_paths = {
         getattr(route, "path", "")
         for route in production_app.routes
@@ -78,7 +79,7 @@ def _materialize_lifespan_api_action_routes():
         yield
     finally:
         production_app.router.routes[:] = original_routes
-        production_app.middleware_stack = None
+        production_app.middleware_stack = original_middleware_stack
 
 
 def _route_records() -> list[tuple[str, str, object]]:
@@ -137,6 +138,24 @@ def test_lifespan_cron_routes_are_present_in_production_catalog():
         ("/crons/jobs", "POST"),
         ("/crons/jobs/{job_id}", "DELETE"),
     }
+
+
+def test_lifespan_route_fixture_restores_existing_middleware_stack():
+    production_app = _production_app()
+    previous_stack = production_app.middleware_stack
+    sentinel_stack = object()
+    production_app.middleware_stack = sentinel_stack
+    fixture_body = _materialize_lifespan_api_action_routes.__wrapped__()
+    restored_stack = None
+    try:
+        next(fixture_body)
+        with pytest.raises(StopIteration):
+            next(fixture_body)
+        restored_stack = production_app.middleware_stack
+    finally:
+        production_app.middleware_stack = previous_stack
+
+    assert restored_stack is sentinel_stack
 
 
 def test_catalog_has_no_duplicate_path_method_registrations():
