@@ -5,6 +5,7 @@ Every builtin tool must declare a NON-UNKNOWN default effect so no tool is
 left accidentally fail-closed and no tool is silently privileged. Each tool
 is also asserted to map to its expected category per the fixed catalog.
 """
+
 from __future__ import annotations
 
 # Importing the tools package triggers every @tool_descriptor at import
