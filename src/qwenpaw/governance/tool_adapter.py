@@ -543,27 +543,33 @@ async def _policy_tool_stream(
 ) -> AsyncGenerator[Any, None]:
     """Stream in O(1) space and handle a leading sandbox violation."""
     emitted = False
-    async for chunk in stream:
-        if _is_explicit_sandbox_violation(chunk, invocation):
-            if emitted:
-                _audit_sandbox_retry_suppressed(self, chunk, invocation)
-                yield chunk
+    completed = False
+    try:
+        async for chunk in stream:
+            if _is_explicit_sandbox_violation(chunk, invocation):
+                if emitted:
+                    _audit_sandbox_retry_suppressed(self, chunk, invocation)
+                    yield chunk
+                    return
+                resolved = await _resolve_sandbox_violation(
+                    self,
+                    chunk,
+                    invocation,
+                    kwargs,
+                    request_context,
+                )
+                if isinstance(resolved, AsyncGenerator):
+                    async for retry_chunk in resolved:
+                        yield retry_chunk
+                else:
+                    yield resolved
                 return
-            resolved = await _resolve_sandbox_violation(
-                self,
-                chunk,
-                invocation,
-                kwargs,
-                request_context,
-            )
-            if isinstance(resolved, AsyncGenerator):
-                async for retry_chunk in resolved:
-                    yield retry_chunk
-            else:
-                yield resolved
-            return
-        yield chunk
-        emitted = True
+            yield chunk
+            emitted = True
+        completed = True
+    finally:
+        if not completed:
+            await stream.aclose()
 
 
 def _sandbox_violation_message(result: ToolChunk) -> str:

@@ -16,7 +16,8 @@ This keeps the gate invisible to local governance tests.
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator
+import inspect
+from collections.abc import AsyncGenerator, Generator
 from typing import TYPE_CHECKING, Any, cast
 
 from ...config.utils import load_config
@@ -113,13 +114,63 @@ def mutation_denied_tool_chunk(decision: MutationDecision) -> Any:
     )
 
 
+async def _call_function_tool_with_cleanup(
+    tool: Any,
+    input_data: dict[str, Any],
+) -> Any:
+    """Match FunctionTool.call while propagating stream cancellation."""
+    from agentscope.tool import ToolChunk
+
+    func = tool._func
+    if inspect.iscoroutinefunction(func):
+        result = await func(**input_data)
+    else:
+        result = func(**input_data)
+
+    if isinstance(result, AsyncGenerator):
+
+        async def async_stream() -> AsyncGenerator[Any, None]:
+            completed = False
+            try:
+                async for chunk in result:
+                    yield (
+                        chunk
+                        if isinstance(chunk, ToolChunk)
+                        else tool._convert_func_result_to_chunk(chunk)
+                    )
+                completed = True
+            finally:
+                if not completed:
+                    await result.aclose()
+
+        return async_stream()
+
+    if isinstance(result, Generator):
+
+        async def sync_stream() -> AsyncGenerator[Any, None]:
+            completed = False
+            try:
+                for chunk in result:
+                    yield (
+                        chunk
+                        if isinstance(chunk, ToolChunk)
+                        else tool._convert_func_result_to_chunk(chunk)
+                    )
+                completed = True
+            finally:
+                if not completed:
+                    result.close()
+
+        return sync_stream()
+
+    return tool._convert_func_result_to_chunk(result)
+
+
 async def execute_authorized_function_tool_call(
     tool: Any,
     input_data: dict[str, Any],
 ) -> Any:
     """Execute after middleware using real params and stream-time recheck."""
-    from agentscope.tool import FunctionTool
-
     from ...runtime.tool_registry import ToolEffectSpec
 
     def authorize() -> MutationDecision:
@@ -138,16 +189,23 @@ async def execute_authorized_function_tool_call(
     if not decision.allowed:
         return mutation_denied_tool_chunk(decision)
 
-    result = await FunctionTool.call(tool, **input_data)
+    result = await _call_function_tool_with_cleanup(tool, input_data)
     if not isinstance(result, AsyncGenerator):
         return result
 
     async def authorized_stream() -> AsyncGenerator[Any, None]:
         stream_decision = authorize()
         if not stream_decision.allowed:
+            await result.aclose()
             yield mutation_denied_tool_chunk(stream_decision)
             return
-        async for chunk in result:
-            yield chunk
+        completed = False
+        try:
+            async for chunk in result:
+                yield chunk
+            completed = True
+        finally:
+            if not completed:
+                await result.aclose()
 
     return authorized_stream()
