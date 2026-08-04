@@ -162,6 +162,77 @@ def _build_default_loader_client(
     return TestClient(app)
 
 
+def _build_dynamic_cron_client(monkeypatch):
+    from qwenpaw.api_action import ManagerRegistry
+    from qwenpaw.app._api_action_routes import register_http_routes
+    from qwenpaw.app.crons.manager import CronManager
+
+    calls: list[tuple[str, str | None]] = []
+
+    class FakeCronManager:
+        async def list_jobs(self):
+            calls.append(("list", None))
+            return []
+
+        async def create_or_replace_job(self, spec):
+            calls.append(("create", spec.name))
+
+        async def delete_job(self, job_id):
+            calls.append(("delete", job_id))
+            return True
+
+    class FakeSecurity:
+        allow_no_auth_hosts: list[str] = []
+        mutation_guard = MutationGuardConfig()
+
+    class FakeConfig:
+        security = FakeSecurity()
+
+    monkeypatch.setattr(auth_mod, "is_auth_enabled", lambda: True)
+    monkeypatch.setattr(
+        auth_mod,
+        "_get_config_cached",
+        lambda: (FakeConfig(), []),
+    )
+
+    async def resolver(request):
+        token = request.headers.get("Authorization", "").removeprefix(
+            "Bearer ",
+        )
+        if token not in {"member", "admin", "root"}:
+            return None
+        return auth_mod.ResolvedIdentity(
+            sender_id=f"{token}@example.com",
+            roles=[token],
+            source="nocobase",
+        )
+
+    auth_mod.register_external_identity_resolver(resolver)
+    app = FastAPI()
+    registry = ManagerRegistry()
+    manager = FakeCronManager()
+    registry.register(CronManager, lambda _app: manager)
+    register_http_routes(app, registry)
+    app.add_middleware(
+        MutationAuthorizationMiddleware,
+        config_loader=MutationGuardConfig,
+    )
+    app.add_middleware(auth_mod.AuthMiddleware)
+    return TestClient(app), calls, resolver
+
+
+_CRON_JOB_BODY = {
+    "name": "daily-summary",
+    "schedule": {"type": "cron", "cron": "0 9 * * *"},
+    "task_type": "text",
+    "text": "summary",
+    "dispatch": {
+        "channel": "console",
+        "target": {"user_id": "user", "session_id": "session"},
+    },
+}
+
+
 @pytest.mark.p0
 def test_get_without_declaration_defaults_to_read_for_member():
     response = _build_client(MEMBER).get("/default-read")
@@ -420,6 +491,94 @@ def test_auth_middleware_runs_before_mutation_authorization(monkeypatch):
 
     assert response.status_code == 403
     assert response.json()["code"] == "mutation_permission_denied"
+
+
+@pytest.mark.p0
+def test_dynamic_cron_routes_require_authentication(monkeypatch):
+    client, calls, resolver = _build_dynamic_cron_client(monkeypatch)
+    try:
+        assert client.get("/crons/jobs").status_code == 401
+        assert (
+            client.post("/crons/jobs", json=_CRON_JOB_BODY).status_code == 401
+        )
+    finally:
+        auth_mod.unregister_external_identity_resolver(resolver)
+
+    assert calls == []
+
+
+@pytest.mark.p0
+@pytest.mark.parametrize(
+    ("method", "path", "body"),
+    [
+        ("POST", "/crons/jobs", _CRON_JOB_BODY),
+        ("PUT", "/crons/jobs", _CRON_JOB_BODY),
+        ("DELETE", "/crons/jobs/job-1", None),
+        ("POST", "/crons/jobs/job-1/pause", None),
+    ],
+)
+def test_member_cannot_mutate_dynamic_cron_routes(
+    monkeypatch,
+    method,
+    path,
+    body,
+):
+    client, calls, resolver = _build_dynamic_cron_client(monkeypatch)
+    try:
+        response = client.request(
+            method,
+            path,
+            json=body,
+            headers={"Authorization": "Bearer member"},
+        )
+    finally:
+        auth_mod.unregister_external_identity_resolver(resolver)
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "mutation_permission_denied"
+    assert calls == []
+
+
+@pytest.mark.p0
+def test_member_can_read_authenticated_dynamic_cron_route(monkeypatch):
+    client, calls, resolver = _build_dynamic_cron_client(monkeypatch)
+    try:
+        response = client.get(
+            "/crons/jobs",
+            headers={"Authorization": "Bearer member"},
+        )
+    finally:
+        auth_mod.unregister_external_identity_resolver(resolver)
+
+    assert response.status_code == 200
+    assert response.json() == []
+    assert calls == [("list", None)]
+
+
+@pytest.mark.p0
+@pytest.mark.parametrize("role", ["admin", "root"])
+def test_privileged_roles_can_use_dynamic_cron_routes(monkeypatch, role):
+    client, calls, resolver = _build_dynamic_cron_client(monkeypatch)
+    headers = {"Authorization": f"Bearer {role}"}
+    try:
+        listed = client.get("/crons/jobs", headers=headers)
+        created = client.post(
+            "/crons/jobs",
+            json=_CRON_JOB_BODY,
+            headers=headers,
+        )
+        deleted = client.delete("/crons/jobs/job-1", headers=headers)
+    finally:
+        auth_mod.unregister_external_identity_resolver(resolver)
+
+    assert listed.status_code == 200
+    assert created.status_code == 200
+    assert deleted.status_code == 200
+    assert calls == [
+        ("list", None),
+        ("create", "daily-summary"),
+        ("delete", "job-1"),
+    ]
 
 
 @pytest.mark.p0

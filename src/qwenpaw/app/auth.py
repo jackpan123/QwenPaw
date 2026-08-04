@@ -19,7 +19,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Awaitable, Callable, Optional
+from typing import Awaitable, Callable, Optional, cast
 
 from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -32,16 +32,18 @@ from ..security.mutation_guard import (
 
 logger = logging.getLogger(__name__)
 
-# Paths that do NOT require authentication
-_PUBLIC_PATHS: frozenset[str] = frozenset(
+# Exact route methods that do NOT require authentication
+_PUBLIC_ROUTES: frozenset[tuple[str, str]] = frozenset(
     {
-        "/api/auth/login",
-        "/api/auth/status",
-        "/api/desktop/shutdown",
-        "/api/version",
-        "/api/settings/language",
-        "/api/settings/upload-limit",
-        "/api/frontend_plugin",
+        ("POST", "/api/auth/login"),
+        ("GET", "/api/auth/status"),
+        ("POST", "/api/desktop/shutdown"),
+        ("GET", "/api/version"),
+        ("GET", "/api/settings/language"),
+        ("GET", "/api/settings/upload-limit"),
+        ("GET", "/api/frontend_plugin"),
+        ("POST", "/voice/incoming"),
+        ("POST", "/voice/status-callback"),
     },
 )
 
@@ -55,6 +57,13 @@ _PUBLIC_PREFIXES: tuple[str, ...] = (
     "/qwenpaw-symbol.svg",
     "/api/frontend_plugin/",
 )
+
+# Manager HTTP actions are registered during lifespan outside ``/api``.
+# Their read routes still expose private application state and therefore
+# require the same identity resolution as API routes.  Match whole path
+# segments so an unrelated frontend route such as ``/cron-help`` remains a
+# public SPA navigation.
+_PROTECTED_NON_API_PREFIXES: tuple[str, ...] = ("/cron", "/crons")
 
 
 # ---------------------------------------------------------------------------
@@ -404,6 +413,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 media_type="application/json",
             )
         if internal_principal is not None:
+            internal_principal = cast(RequestPrincipal, internal_principal)
             request.state.user = internal_principal.user_id
             request.state.user_roles = list(internal_principal.roles)
             request.state.auth_source = internal_principal.source
@@ -478,11 +488,25 @@ class AuthMiddleware(BaseHTTPMiddleware):
             return True
 
         path = request.url.path
+        route_method = "GET" if request.method == "HEAD" else request.method
         if (
             request.method == "OPTIONS"
-            or path in _PUBLIC_PATHS
-            or any(path.startswith(p) for p in _PUBLIC_PREFIXES)
-            or not path.startswith("/api/")
+            or (route_method, path) in _PUBLIC_ROUTES
+            or (
+                request.method in {"GET", "HEAD"}
+                and any(path.startswith(p) for p in _PUBLIC_PREFIXES)
+            )
+        ):
+            return True
+
+        is_protected_non_api = any(
+            path == prefix or path.startswith(f"{prefix}/")
+            for prefix in _PROTECTED_NON_API_PREFIXES
+        )
+        if (
+            not path.startswith("/api/")
+            and request.method in {"GET", "HEAD"}
+            and not is_protected_non_api
         ):
             return True
 

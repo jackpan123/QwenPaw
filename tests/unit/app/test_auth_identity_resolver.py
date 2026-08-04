@@ -405,3 +405,73 @@ def test_skip_auth_public_path_always_skipped(monkeypatch):
     register_external_identity_resolver(r)
     req = _make_request(path="/api/auth/login", method="POST")
     assert auth_mod.AuthMiddleware._should_skip_auth(req) is True
+
+
+@pytest.mark.parametrize(
+    ("path", "method"),
+    [
+        ("/cron/jobs", "POST"),
+        ("/crons/jobs", "POST"),
+        ("/external/write", "POST"),
+        ("/assets/future-write", "POST"),
+        ("/api/frontend_plugin/future-write", "POST"),
+        ("/api/settings/language", "PUT"),
+    ],
+)
+def test_skip_auth_does_not_trust_write_paths(monkeypatch, path, method):
+    monkeypatch.setattr(auth_mod, "is_auth_enabled", lambda: True)
+    monkeypatch.setattr(
+        auth_mod,
+        "_get_config_cached",
+        lambda: (_FakeConfig(), []),
+    )
+
+    assert (
+        auth_mod.AuthMiddleware._should_skip_auth(
+            _make_request(path=path, method=method),
+        )
+        is False
+    )
+
+
+def test_skip_auth_requires_identity_for_cron_reads(monkeypatch):
+    monkeypatch.setattr(auth_mod, "is_auth_enabled", lambda: True)
+    monkeypatch.setattr(
+        auth_mod,
+        "_get_config_cached",
+        lambda: (_FakeConfig(), []),
+    )
+
+    assert (
+        auth_mod.AuthMiddleware._should_skip_auth(
+            _make_request(path="/crons/jobs", method="GET"),
+        )
+        is False
+    )
+
+
+@pytest.mark.parametrize(
+    ("path", "method"),
+    [
+        ("/", "GET"),
+        ("/console/agents", "GET"),
+        ("/assets/app.js", "GET"),
+        ("/api/version", "HEAD"),
+        ("/api/settings/language", "GET"),
+        ("/voice/incoming", "POST"),
+        ("/voice/status-callback", "POST"),
+    ],
+)
+def test_skip_auth_preserves_public_frontend_and_voice_paths(
+    monkeypatch,
+    path,
+    method,
+):
+    monkeypatch.setattr(auth_mod, "is_auth_enabled", lambda: True)
+
+    assert (
+        auth_mod.AuthMiddleware._should_skip_auth(
+            _make_request(path=path, method=method),
+        )
+        is True
+    )

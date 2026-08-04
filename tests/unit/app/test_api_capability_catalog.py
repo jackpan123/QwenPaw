@@ -6,6 +6,8 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Iterable, Iterator
 
+import pytest
+
 from qwenpaw.app.mutation_authorization import (
     default_capability_for_method,
 )
@@ -46,11 +48,37 @@ def _iter_route_methods(
 
 
 def _production_app():
-    # Importing the module builds routes but does not enter the lifespan,
-    # so no workspace or other external service is started.
     from qwenpaw.app._app import app
 
     return app
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _materialize_lifespan_api_action_routes():
+    """Register the production routes normally added inside lifespan."""
+    from qwenpaw.api_action import ManagerRegistry
+    from qwenpaw.app._api_action_routes import register_http_routes
+    from qwenpaw.app.crons.manager import CronManager
+
+    production_app = _production_app()
+    original_routes = list(production_app.routes)
+    existing_cron_paths = {
+        getattr(route, "path", "")
+        for route in production_app.routes
+        if getattr(route, "path", "").startswith("/crons/")
+    }
+    expected_cron_paths = {"/crons/jobs", "/crons/jobs/{job_id}"}
+    if not existing_cron_paths:
+        registry = ManagerRegistry()
+        registry.register(CronManager, lambda _app: None)
+        register_http_routes(production_app, registry)
+    else:
+        assert existing_cron_paths == expected_cron_paths
+    try:
+        yield
+    finally:
+        production_app.router.routes[:] = original_routes
+        production_app.middleware_stack = None
 
 
 def _route_records() -> list[tuple[str, str, object]]:
@@ -88,7 +116,27 @@ def test_catalog_covers_every_production_route_method():
         ("/api/desktop/shutdown", "POST"),
         ("/api/agents/{agentId}/console/chat", "POST"),
         ("/voice/incoming", "POST"),
+        ("/crons/jobs", "GET"),
+        ("/crons/jobs", "POST"),
+        ("/crons/jobs/{job_id}", "DELETE"),
     } <= catalog_keys
+
+
+def test_lifespan_cron_routes_are_present_in_production_catalog():
+    """Use a direct route scan independent of the catalog walker."""
+    cron_routes: set[tuple[str, str]] = set()
+    for route in _production_app().routes:
+        path = getattr(route, "path", "")
+        if not path.startswith("/crons/"):
+            continue
+        methods = getattr(route, "methods", None) or ()
+        cron_routes.update((path, method) for method in methods)
+
+    assert cron_routes == {
+        ("/crons/jobs", "GET"),
+        ("/crons/jobs", "POST"),
+        ("/crons/jobs/{job_id}", "DELETE"),
+    }
 
 
 def test_catalog_has_no_duplicate_path_method_registrations():
