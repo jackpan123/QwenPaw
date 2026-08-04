@@ -5,7 +5,7 @@ Target routes (added by PR #5687 for the v2.0.0 background-task model):
   - POST /api/console/chat/task
   - GET  /api/console/chat/task/{task_id}
 
-The task_id is opaque (``task-<12hex>``), fresh per POST, and stored in a
+The task_id is opaque (``task-<uuid4hex>``), fresh per POST, and stored in a
 module-level ``_bg_tasks`` dict inside ``routers/console.py``.  Session
 id is orthogonal — it is what the console channel resolves for the run
 itself (``f"console:{sender_id}"`` when not provided explicitly).
@@ -106,7 +106,7 @@ def test_chat_task_submit_registers_chat_and_completes(
     """POST /console/chat/task → task_id, then poll → finished + session_id.
 
     Test purpose:
-      - Verify a chat/task submission returns a fresh ``task-<hex12>``,
+      - Verify a chat/task submission returns a fresh ``task-<uuid4hex>``,
         registers its session in the chat index, runs to completion in the
         background, and eventually reports ``status='finished'`` with the
         expected ``session_id`` in the result payload.
@@ -143,8 +143,8 @@ def test_chat_task_submit_registers_chat_and_completes(
         assert submit_resp.status_code == 200, app_server.logs_tail()
         task_id = submit_resp.json()["task_id"]
         assert task_id.startswith("task-"), task_id
-        # ``uuid.uuid4().hex[:12]`` is 12 hex chars.
-        assert len(task_id) == len("task-") + 12, task_id
+        # Full UUID4 hex keeps 128 bits of entropy in this opaque id.
+        assert len(task_id) == len("task-") + 32, task_id
 
         chats_resp = app_server.api_request(
             "GET",

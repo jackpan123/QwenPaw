@@ -2,11 +2,13 @@
 """Tools and shared helpers for agent discovery and inter-agent chat."""
 
 import asyncio
+from collections import OrderedDict
 import ipaddress
 import json
 import logging
 import math
 import re
+import threading
 import time
 from typing import Any, Callable, Dict, Optional
 from urllib.parse import urlparse
@@ -36,7 +38,13 @@ _RESERVED_PRINCIPAL_KEYS = frozenset({"request_principal", "acl_principal"})
 # Background tasks live in the same process as this client-side tool state.
 # Remember the target agent that accepted each opaque task id so later status
 # calls can mint a credential bound to the same routed agent.
-_BACKGROUND_TASK_AGENTS: dict[str, str] = {}
+_BACKGROUND_TASK_AGENT_TTL_SECONDS = 24 * 60 * 60.0
+_BACKGROUND_TASK_AGENT_MAX_ENTRIES = 4096
+_BACKGROUND_TASK_AGENTS: OrderedDict[str, tuple[str, float]] = OrderedDict()
+_BACKGROUND_TASK_AGENTS_LOCK = threading.RLock()
+_TERMINAL_BACKGROUND_TASK_STATUSES = frozenset(
+    {"finished", "failed", "cancelled", "canceled"},
+)
 
 
 def resolve_agent_api_base_url(base_url: Optional[str] = None) -> str:
@@ -53,7 +61,16 @@ def resolve_agent_api_base_url(base_url: Optional[str] = None) -> str:
     last_api = read_last_api()
     if last_api:
         host, port = last_api
-        return f"http://{host}:{port}"
+        formatted_host = str(host)
+        candidate = formatted_host.strip("[]")
+        try:
+            address = ipaddress.ip_address(candidate)
+        except ValueError:
+            pass
+        else:
+            if address.version == 6:
+                formatted_host = f"[{candidate}]"
+        return f"http://{formatted_host}:{port}"
 
     return DEFAULT_AGENT_API_BASE_URL
 
@@ -97,15 +114,71 @@ def _is_local_agent_api_target(base_url: Optional[str]) -> bool:
     return address.is_loopback or address.is_unspecified
 
 
-def _remember_background_task_agent(task_id: str, to_agent: str) -> None:
-    """Bind an opaque background task id to its routed target agent."""
-    if task_id and to_agent:
-        _BACKGROUND_TASK_AGENTS[task_id] = to_agent
+def _prune_background_task_agents(now: float) -> None:
+    """Drop expired bindings while the caller holds the binding lock."""
+    while _BACKGROUND_TASK_AGENTS:
+        _task_id, (_agent_id, expires_at) = next(
+            iter(_BACKGROUND_TASK_AGENTS.items()),
+        )
+        if expires_at > now:
+            break
+        _BACKGROUND_TASK_AGENTS.popitem(last=False)
 
 
-def _background_task_agent(task_id: str) -> Optional[str]:
+def _remember_background_task_agent(
+    task_id: str,
+    to_agent: str,
+    *,
+    now: Optional[float] = None,
+) -> bool:
+    """Bind an opaque task id without permitting cross-agent rebinding."""
+    if not task_id or not to_agent:
+        return False
+    current_time = time.monotonic() if now is None else now
+    with _BACKGROUND_TASK_AGENTS_LOCK:
+        _prune_background_task_agents(current_time)
+        existing = _BACKGROUND_TASK_AGENTS.get(task_id)
+        if existing is not None and existing[0] != to_agent:
+            return False
+        _BACKGROUND_TASK_AGENTS[task_id] = (
+            to_agent,
+            current_time + _BACKGROUND_TASK_AGENT_TTL_SECONDS,
+        )
+        _BACKGROUND_TASK_AGENTS.move_to_end(task_id)
+        while (
+            len(_BACKGROUND_TASK_AGENTS) > _BACKGROUND_TASK_AGENT_MAX_ENTRIES
+        ):
+            _BACKGROUND_TASK_AGENTS.popitem(last=False)
+    return True
+
+
+def _background_task_agent(
+    task_id: str,
+    *,
+    now: Optional[float] = None,
+) -> Optional[str]:
     """Return the target agent previously recorded for *task_id*."""
-    return _BACKGROUND_TASK_AGENTS.get(task_id)
+    current_time = time.monotonic() if now is None else now
+    with _BACKGROUND_TASK_AGENTS_LOCK:
+        _prune_background_task_agents(current_time)
+        binding = _BACKGROUND_TASK_AGENTS.get(task_id)
+        return binding[0] if binding is not None else None
+
+
+def _forget_background_task_agent(
+    task_id: str,
+    *,
+    expected_agent: Optional[str] = None,
+) -> bool:
+    """Remove a binding only when it still belongs to the expected agent."""
+    with _BACKGROUND_TASK_AGENTS_LOCK:
+        binding = _BACKGROUND_TASK_AGENTS.get(task_id)
+        if binding is None:
+            return False
+        if expected_agent is not None and binding[0] != expected_agent:
+            return False
+        del _BACKGROUND_TASK_AGENTS[task_id]
+        return True
 
 
 def _tool_text_response(text: str) -> ToolChunk:
@@ -419,8 +492,13 @@ def submit_agent_chat_task(
         response.raise_for_status()
         result = response.json()
         task_id = result.get("task_id") if isinstance(result, dict) else None
-        if isinstance(task_id, str):
-            _remember_background_task_agent(task_id, to_agent)
+        if isinstance(task_id, str) and not _remember_background_task_agent(
+            task_id,
+            to_agent,
+        ):
+            raise RuntimeError(
+                f"background task target binding collision for [{task_id}]",
+            )
         return result
 
 
@@ -439,7 +517,16 @@ def get_agent_chat_task_status(
             timeout=timeout,
         )
         response.raise_for_status()
-        return response.json()
+        result = response.json()
+        if (
+            isinstance(result, dict)
+            and result.get("status") in _TERMINAL_BACKGROUND_TASK_STATUSES
+        ):
+            _forget_background_task_agent(
+                task_id,
+                expected_agent=target_agent,
+            )
+        return result
 
 
 def format_agent_chat_text(

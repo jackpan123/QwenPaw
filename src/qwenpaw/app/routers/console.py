@@ -611,7 +611,7 @@ async def post_console_chat_task(  # pylint: disable=too-many-statements
             detail="Channel Console not found",
         )
 
-    task_id = f"task-{uuid.uuid4().hex[:12]}"
+    task_id = f"task-{uuid.uuid4().hex}"
     acl_sender_id = getattr(request.state, "user", "") or ""
     acl_roles = getattr(request.state, "user_roles", None) or []
     request_principal = getattr(

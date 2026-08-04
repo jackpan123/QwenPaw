@@ -4,9 +4,11 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import json
 
 import httpx
+import pytest
 from agentscope.tool import FunctionTool
 from agentscope.tool import Toolkit
 
@@ -14,6 +16,13 @@ from qwenpaw.agents.tools import agent_management
 from qwenpaw.app import internal_auth
 from qwenpaw.app.agent_context import set_current_request_principal
 from qwenpaw.security.mutation_guard import RequestPrincipal
+
+
+@pytest.fixture(autouse=True)
+def _clear_background_task_bindings():
+    agent_management._BACKGROUND_TASK_AGENTS.clear()
+    yield
+    agent_management._BACKGROUND_TASK_AGENTS.clear()
 
 
 class _FakeResponse:
@@ -187,6 +196,19 @@ def test_resolve_agent_api_base_url_uses_last_api(monkeypatch):
     assert result == "http://192.168.1.8:18088"
 
 
+@pytest.mark.parametrize("host", ["::", "::1"])
+def test_resolve_agent_api_base_url_brackets_ipv6_last_api(monkeypatch, host):
+    monkeypatch.setattr(
+        agent_management,
+        "read_last_api",
+        lambda: (host, 18088),
+    )
+
+    result = agent_management.resolve_agent_api_base_url()
+
+    assert result == f"http://[{host}]:18088"
+
+
 def test_resolve_agent_api_base_url_falls_back_to_default(monkeypatch):
     monkeypatch.setattr(agent_management, "read_last_api", lambda: None)
 
@@ -297,6 +319,87 @@ async def test_check_agent_task_formats_finished_background_result(
     assert "[TASK_ID: task-1]" in text
     assert "Background reply" in text
     assert captured == {"to_agent": "worker-agent", "timeout": 10}
+
+
+def test_background_task_binding_rejects_cross_agent_collision():
+    assert agent_management._remember_background_task_agent(
+        "task-collision",
+        "agent-a",
+        now=100.0,
+    )
+    assert not agent_management._remember_background_task_agent(
+        "task-collision",
+        "agent-b",
+        now=101.0,
+    )
+    assert (
+        agent_management._background_task_agent(
+            "task-collision",
+            now=101.0,
+        )
+        == "agent-a"
+    )
+
+
+def test_background_task_binding_concurrent_collision_has_one_winner():
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(
+            pool.map(
+                lambda agent: (
+                    agent,
+                    agent_management._remember_background_task_agent(
+                        "task-concurrent",
+                        agent,
+                        now=100.0,
+                    ),
+                ),
+                ("agent-a", "agent-b"),
+            ),
+        )
+
+    winners = [agent for agent, accepted in results if accepted]
+    assert len(winners) == 1
+    assert (
+        agent_management._background_task_agent(
+            "task-concurrent",
+            now=100.0,
+        )
+        == winners[0]
+    )
+
+
+def test_background_task_binding_expires_and_is_capacity_bounded(monkeypatch):
+    monkeypatch.setattr(
+        agent_management,
+        "_BACKGROUND_TASK_AGENT_TTL_SECONDS",
+        5.0,
+    )
+    monkeypatch.setattr(
+        agent_management,
+        "_BACKGROUND_TASK_AGENT_MAX_ENTRIES",
+        2,
+    )
+    assert agent_management._remember_background_task_agent(
+        "task-a",
+        "agent-a",
+        now=100.0,
+    )
+    assert agent_management._remember_background_task_agent(
+        "task-b",
+        "agent-b",
+        now=101.0,
+    )
+    assert agent_management._remember_background_task_agent(
+        "task-c",
+        "agent-c",
+        now=102.0,
+    )
+    assert agent_management._background_task_agent("task-a", now=102.0) is None
+    assert (
+        agent_management._background_task_agent("task-b", now=105.9)
+        == "agent-b"
+    )
+    assert agent_management._background_task_agent("task-b", now=106.0) is None
 
 
 async def test_background_fork_watcher_propagates_target_agent(monkeypatch):

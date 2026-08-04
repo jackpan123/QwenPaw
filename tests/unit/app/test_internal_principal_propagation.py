@@ -369,3 +369,70 @@ def test_submit_and_status_send_target_bound_principal(monkeypatch):
     assert len(seen) == 2
     _assert_signed_for(seen[0], "task-child")
     _assert_signed_for(seen[1], "task-child")
+    assert agent_management._background_task_agent("task-signed") == (
+        "task-child"
+    )
+
+
+def test_terminal_status_cleans_task_target_after_signed_request(monkeypatch):
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(200, json={"status": "finished"})
+
+    _recording_client(monkeypatch, handler)
+    assert agent_management._remember_background_task_agent(
+        "task-finished",
+        "terminal-child",
+    )
+
+    result = agent_management.get_agent_chat_task_status(
+        None,
+        "task-finished",
+    )
+
+    assert result == {"status": "finished"}
+    _assert_signed_for(seen[0], "terminal-child")
+    assert agent_management._background_task_agent("task-finished") is None
+
+
+def test_status_error_preserves_task_target_for_retry(monkeypatch):
+    def handler(request):
+        return httpx.Response(503, request=request)
+
+    _recording_client(monkeypatch, handler)
+    assert agent_management._remember_background_task_agent(
+        "task-retry",
+        "retry-child",
+    )
+
+    with pytest.raises(httpx.HTTPStatusError):
+        agent_management.get_agent_chat_task_status(None, "task-retry")
+
+    assert agent_management._background_task_agent("task-retry") == (
+        "retry-child"
+    )
+
+
+def test_submit_fails_closed_on_cross_agent_task_id_collision(monkeypatch):
+    def handler(_request):
+        return httpx.Response(200, json={"task_id": "task-collision"})
+
+    _recording_client(monkeypatch, handler)
+    assert agent_management._remember_background_task_agent(
+        "task-collision",
+        "agent-a",
+    )
+
+    with pytest.raises(RuntimeError, match="target binding collision"):
+        agent_management.submit_agent_chat_task(
+            None,
+            {"session_id": "sid", "input": []},
+            "agent-b",
+            30,
+        )
+
+    assert agent_management._background_task_agent("task-collision") == (
+        "agent-a"
+    )
