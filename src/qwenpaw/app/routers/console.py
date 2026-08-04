@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """Console APIs: push messages, chat, and file upload for chat."""
+
 from __future__ import annotations
 
 import asyncio
@@ -37,7 +38,6 @@ from ..approvals.display import approval_display_fields
 from ..chats.title_generator import generate_and_update_title
 from ..mutation_authorization import api_capability
 from ..utils import check_upload_size
-
 
 logger = logging.getLogger(__name__)
 

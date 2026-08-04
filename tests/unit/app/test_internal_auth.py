@@ -11,7 +11,6 @@ from qwenpaw.app import internal_auth
 from qwenpaw.config.config import MutationGuardConfig
 from qwenpaw.security.mutation_guard import RequestPrincipal
 
-
 MEMBER_PRINCIPAL = RequestPrincipal(
     user_id="alice",
     roles=("member",),

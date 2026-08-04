@@ -15,6 +15,7 @@ final agent reply contents — that is already exercised by
 test_console_chat.py and test_cron_execution.py.  Here we cover the
 task-lifecycle contract that Sprint 4.1 introduces.
 """
+
 from __future__ import annotations
 
 import threading

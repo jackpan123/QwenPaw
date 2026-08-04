@@ -11,6 +11,9 @@ from agentscope.tool import FunctionTool
 from agentscope.tool import Toolkit
 
 from qwenpaw.agents.tools import agent_management
+from qwenpaw.app import internal_auth
+from qwenpaw.app.agent_context import set_current_request_principal
+from qwenpaw.security.mutation_guard import RequestPrincipal
 
 
 class _FakeResponse:
@@ -258,10 +261,12 @@ async def test_list_agents_uses_to_thread(monkeypatch):
 async def test_check_agent_task_formats_finished_background_result(
     monkeypatch,
 ):
-    monkeypatch.setattr(
-        agent_management,
-        "get_agent_chat_task_status",
-        lambda *_args, **_kwargs: {
+    captured = {}
+
+    def fake_status(_base_url, _task_id, *, to_agent, timeout):
+        captured["to_agent"] = to_agent
+        captured["timeout"] = timeout
+        return {
             "status": "finished",
             "result": {
                 "status": "completed",
@@ -274,7 +279,16 @@ async def test_check_agent_task_formats_finished_background_result(
                     },
                 ],
             },
-        },
+        }
+
+    monkeypatch.setattr(
+        agent_management,
+        "get_agent_chat_task_status",
+        fake_status,
+    )
+    agent_management._remember_background_task_agent(
+        "task-1",
+        "worker-agent",
     )
 
     response = await agent_management.check_agent_task("task-1")
@@ -282,6 +296,123 @@ async def test_check_agent_task_formats_finished_background_result(
     text = response.content[0].text
     assert "[TASK_ID: task-1]" in text
     assert "Background reply" in text
+    assert captured == {"to_agent": "worker-agent", "timeout": 10}
+
+
+async def test_background_fork_watcher_propagates_target_agent(monkeypatch):
+    captured = {}
+
+    def fake_status(_base_url, task_id, *, to_agent, timeout):
+        captured.update(
+            task_id=task_id,
+            to_agent=to_agent,
+            timeout=timeout,
+        )
+        return {"status": "finished", "result": {"status": "completed"}}
+
+    async def immediate_sleep(_delay):
+        return None
+
+    async def immediate_to_thread(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(
+        agent_management,
+        "get_agent_chat_task_status",
+        fake_status,
+    )
+    monkeypatch.setattr(agent_management.asyncio, "sleep", immediate_sleep)
+    monkeypatch.setattr(
+        agent_management.asyncio,
+        "to_thread",
+        immediate_to_thread,
+    )
+    monkeypatch.setattr(
+        "qwenpaw.agents.fork_project.finalize_fork_worktree_or_fail",
+        lambda *_args, **_kwargs: True,
+    )
+
+    await agent_management._watch_background_fork_finalize(
+        "task-fork",
+        "/tmp/worktree",
+        "fork-branch",
+        to_agent="fork-worker",
+    )
+
+    assert captured == {
+        "task_id": "task-fork",
+        "to_agent": "fork-worker",
+        "timeout": 10,
+    }
+
+
+async def test_call_fork_api_sends_target_bound_headers(monkeypatch):
+    captured = []
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"fork_session_id": "sub-1"}
+
+    class FakeAsyncClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def post(self, url, *, json, headers):
+            captured.append({"url": url, "json": json, "headers": headers})
+            return FakeResponse()
+
+    monkeypatch.setattr(
+        agent_management.httpx,
+        "AsyncClient",
+        FakeAsyncClient,
+    )
+    set_current_request_principal(
+        RequestPrincipal(
+            user_id="alice",
+            roles=("member",),
+            source="nocobase",
+            guarded=True,
+            can_mutate=False,
+        ),
+    )
+    try:
+        local_result = await agent_management._call_fork_api(
+            "fork-target",
+            "parent-session",
+            base_url="http://127.0.0.1:8088",
+        )
+        remote_result = await agent_management._call_fork_api(
+            "remote-target",
+            "parent-session",
+            base_url="https://agents.example.com",
+        )
+    finally:
+        set_current_request_principal(None)
+
+    assert local_result == {"fork_session_id": "sub-1"}
+    assert remote_result == {"fork_session_id": "sub-1"}
+    local_headers = captured[0]["headers"]
+    assert local_headers["X-Agent-Id"] == "fork-target"
+    credential = local_headers[internal_auth.INTERNAL_PRINCIPAL_HEADER]
+    assert (
+        internal_auth.verify_internal_principal(
+            credential,
+            target_agent_id="fork-target",
+        )
+        is not None
+    )
+    remote_headers = captured[1]["headers"]
+    assert remote_headers["X-Agent-Id"] == "remote-target"
+    assert internal_auth.INTERNAL_PRINCIPAL_HEADER not in remote_headers
 
 
 async def test_chat_with_agent_uses_to_thread_for_final_mode(monkeypatch):

@@ -2,6 +2,7 @@
 """Tools and shared helpers for agent discovery and inter-agent chat."""
 
 import asyncio
+import ipaddress
 import json
 import logging
 import math
@@ -32,6 +33,11 @@ MAX_SPAWN_BATCH_CONCURRENCY = 3
 # The trusted principal travels via the signed header, never in plaintext.
 _RESERVED_PRINCIPAL_KEYS = frozenset({"request_principal", "acl_principal"})
 
+# Background tasks live in the same process as this client-side tool state.
+# Remember the target agent that accepted each opaque task id so later status
+# calls can mint a credential bound to the same routed agent.
+_BACKGROUND_TASK_AGENTS: dict[str, str] = {}
+
 
 def resolve_agent_api_base_url(base_url: Optional[str] = None) -> str:
     """Resolve the agent API base URL.
@@ -59,12 +65,6 @@ def _normalize_api_base_url(base_url: Optional[str]) -> str:
     return base
 
 
-# Hosts considered local: a credential is only ever sent to these.
-_LOOPBACK_HOSTS = frozenset(
-    {"127.0.0.1", "::1", "localhost", "0.0.0.0", ""},
-)
-
-
 def _is_local_agent_api_target(base_url: Optional[str]) -> bool:
     """Return True when *base_url* targets the in-process agent API.
 
@@ -77,14 +77,35 @@ def _is_local_agent_api_target(base_url: Optional[str]) -> bool:
     resolved = resolve_agent_api_base_url(base_url)
     try:
         parsed = urlparse(resolved)
+        if parsed.scheme.lower() not in {"http", "https"}:
+            return False
+        if not parsed.netloc or parsed.hostname is None:
+            return False
+        if parsed.username is not None or parsed.password is not None:
+            return False
+        # Accessing ``port`` validates its syntax and range.
+        _ = parsed.port
+    except (TypeError, ValueError):
+        return False
+    host = parsed.hostname.lower()
+    if host == "localhost":
+        return True
+    try:
+        address = ipaddress.ip_address(host)
     except ValueError:
         return False
-    host = (parsed.hostname or "").lower()
-    if host in _LOOPBACK_HOSTS:
-        return True
-    if resolved.rstrip("/") == DEFAULT_AGENT_API_BASE_URL.rstrip("/"):
-        return True
-    return False
+    return address.is_loopback or address.is_unspecified
+
+
+def _remember_background_task_agent(task_id: str, to_agent: str) -> None:
+    """Bind an opaque background task id to its routed target agent."""
+    if task_id and to_agent:
+        _BACKGROUND_TASK_AGENTS[task_id] = to_agent
+
+
+def _background_task_agent(task_id: str) -> Optional[str]:
+    """Return the target agent previously recorded for *task_id*."""
+    return _BACKGROUND_TASK_AGENTS.get(task_id)
 
 
 def _tool_text_response(text: str) -> ToolChunk:
@@ -396,7 +417,11 @@ def submit_agent_chat_task(
             timeout=timeout,
         )
         response.raise_for_status()
-        return response.json()
+        result = response.json()
+        task_id = result.get("task_id") if isinstance(result, dict) else None
+        if isinstance(task_id, str):
+            _remember_background_task_agent(task_id, to_agent)
+        return result
 
 
 def get_agent_chat_task_status(
@@ -406,10 +431,11 @@ def get_agent_chat_task_status(
     timeout: int = 10,
 ) -> Dict[str, Any]:
     """Get the current status for a background inter-agent chat task."""
+    target_agent = to_agent or _background_task_agent(task_id)
     with create_agent_api_client(base_url) as client:
         response = client.get(
             f"/console/chat/task/{task_id}",
-            headers=_request_headers(to_agent, base_url),
+            headers=_request_headers(target_agent, base_url),
             timeout=timeout,
         )
         response.raise_for_status()
@@ -745,11 +771,18 @@ async def check_agent_task(
             "ERROR: 'task_id' is required to check task status",
         )
 
+    target_agent = _background_task_agent(normalized_task_id)
+    if not target_agent:
+        return _tool_text_response(
+            "ERROR: no target agent is recorded for task "
+            f"[{normalized_task_id}]",
+        )
+
     result = await asyncio.to_thread(
         get_agent_chat_task_status,
         None,
         normalized_task_id,
-        to_agent=None,
+        to_agent=target_agent,
         timeout=10,
     )
     # Background fork workers: commit on success, mark failed otherwise.
@@ -1383,7 +1416,11 @@ async def _call_fork_api(
             timeout=30.0,
             trust_env=trust_env_for_url(url),
         ) as client:
-            resp = await client.post(url, json=payload)
+            resp = await client.post(
+                url,
+                json=payload,
+                headers=_request_headers(agent_id, base_url),
+            )
             resp.raise_for_status()
             return resp.json()
     except Exception as exc:  # noqa: BLE001
@@ -1520,6 +1557,7 @@ async def _spawn_forked_subagent(
                     str(task_id),
                     worktree_path,
                     worktree_branch,
+                    to_agent=current_agent_id,
                     timeout=timeout,
                     expected_scope=fork_scope_id or None,
                 ),
@@ -1599,6 +1637,7 @@ async def _watch_background_fork_finalize(
     worktree_path: str,
     worktree_branch: str,
     *,
+    to_agent: str,
     timeout: int = 600,
     expected_scope: str | None = None,
 ) -> None:
@@ -1619,7 +1658,7 @@ async def _watch_background_fork_finalize(
                 get_agent_chat_task_status,
                 None,
                 task_id,
-                to_agent=None,
+                to_agent=to_agent,
                 timeout=10,
             )
         except Exception:  # noqa: BLE001

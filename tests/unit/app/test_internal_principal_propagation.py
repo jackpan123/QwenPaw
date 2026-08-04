@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+import httpx
 import pytest
 from starlette.applications import Starlette
 from starlette.requests import Request as _Req
@@ -17,7 +18,6 @@ from qwenpaw.app import internal_auth
 from qwenpaw.agents.tools import agent_management
 from qwenpaw.config.config import MutationGuardConfig
 from qwenpaw.security.mutation_guard import RequestPrincipal
-
 
 MEMBER_PRINCIPAL = RequestPrincipal(
     user_id="alice",
@@ -222,6 +222,36 @@ def test_request_headers_attaches_credential_for_localhost():
     assert internal_auth.INTERNAL_PRINCIPAL_HEADER in headers
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://[::]:8088",
+        "https://[::1]:8443/api",
+        "http://127.0.0.2:8088",
+    ],
+)
+def test_request_headers_attaches_credential_for_local_ip_targets(url):
+    headers = agent_management._request_headers("child-agent", base_url=url)
+    assert internal_auth.INTERNAL_PRINCIPAL_HEADER in headers
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "file://localhost/tmp/qwenpaw",
+        "ftp://127.0.0.1:8088/api",
+        "http:///api",
+        "not-a-url",
+        "http://[::1",
+        "http://localhost:invalid/api",
+        "http://user@localhost:8088/api",
+    ],
+)
+def test_request_headers_rejects_malformed_or_non_http_targets(url):
+    headers = agent_management._request_headers("child-agent", base_url=url)
+    assert internal_auth.INTERNAL_PRINCIPAL_HEADER not in headers
+
+
 def test_request_headers_omits_credential_for_remote_url():
     """A remote target must NEVER receive the internal credential."""
     headers = agent_management._request_headers(
@@ -243,3 +273,99 @@ def test_request_headers_omits_credential_without_principal():
     )
     assert internal_auth.INTERNAL_PRINCIPAL_HEADER not in headers
     assert headers["X-Agent-Id"] == "child-agent"
+
+
+def _recording_client(monkeypatch, handler):
+    transport = httpx.MockTransport(handler)
+
+    def factory(base_url, default_timeout=30.0):
+        del default_timeout
+        return httpx.Client(
+            base_url=agent_management._normalize_api_base_url(base_url),
+            transport=transport,
+        )
+
+    monkeypatch.setattr(
+        agent_management,
+        "create_agent_api_client",
+        factory,
+    )
+
+
+def _assert_signed_for(request, target_agent):
+    assert request.headers["X-Agent-Id"] == target_agent
+    credential = request.headers[internal_auth.INTERNAL_PRINCIPAL_HEADER]
+    verified = internal_auth.verify_internal_principal(
+        credential,
+        target_agent_id=target_agent,
+    )
+    assert verified is not None
+    assert verified.user_id == "alice"
+
+
+def test_stream_agent_chat_sends_target_bound_principal(monkeypatch):
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(
+            200,
+            text='data: {"output": []}\n\n',
+            headers={"content-type": "text/event-stream"},
+        )
+
+    _recording_client(monkeypatch, handler)
+    agent_management.stream_agent_chat(
+        None,
+        {"session_id": "sid", "input": []},
+        "stream-child",
+        30,
+    )
+    _assert_signed_for(seen[0], "stream-child")
+
+
+def test_collect_agent_chat_sends_target_bound_principal(monkeypatch):
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(
+            200,
+            text='data: {"output": []}\n\n',
+            headers={"content-type": "text/event-stream"},
+        )
+
+    _recording_client(monkeypatch, handler)
+    agent_management.collect_final_agent_chat_response(
+        None,
+        {"session_id": "sid", "input": []},
+        "collect-child",
+        30,
+    )
+    _assert_signed_for(seen[0], "collect-child")
+
+
+def test_submit_and_status_send_target_bound_principal(monkeypatch):
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        if request.method == "POST":
+            return httpx.Response(200, json={"task_id": "task-signed"})
+        return httpx.Response(200, json={"status": "running"})
+
+    _recording_client(monkeypatch, handler)
+    result = agent_management.submit_agent_chat_task(
+        None,
+        {"session_id": "sid", "input": []},
+        "task-child",
+        30,
+    )
+    agent_management.get_agent_chat_task_status(
+        None,
+        result["task_id"],
+        to_agent="task-child",
+    )
+    assert len(seen) == 2
+    _assert_signed_for(seen[0], "task-child")
+    _assert_signed_for(seen[1], "task-child")
