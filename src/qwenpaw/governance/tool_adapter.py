@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import logging
 import uuid
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from agentscope.message import TextBlock
@@ -33,6 +35,17 @@ _NO_RETRY_INSTRUCTION = (
     " not be completed and, if appropriate, ask them how they want"
     " to proceed."
 )
+
+
+@dataclass
+class _PolicyInvocationState:
+    """Task-local governance state for one tool invocation."""
+
+    raw_params: dict[str, Any] = field(default_factory=dict)
+    policy_decision: GovernanceDecision | None = None
+    tc_spec: ToolCallSpec | None = None
+    sandbox_mode: bool = False
+    sandbox_config: Any = None
 
 
 def _is_execution_level_off() -> bool:
@@ -133,6 +146,7 @@ class PolicyGuardedTool:
                     "_build_tc_spec": _build_tc_spec,
                     "check_permissions": _policy_tool_check_permissions,
                     "__call__": _policy_tool_call,
+                    "call": _policy_tool_execute,
                     "__doc__": cls.__doc__,
                 },
             )
@@ -159,15 +173,21 @@ def _policy_tool_init(
     # Role-based side-effect model for the authoritative mutation gate.
     # Default UNKNOWN → fail-closed for unannotated tools.
     self._qp_effect_spec = effect_spec or get_tool_effect_spec(func)
-    self._qp_policy_decision = None  # Pre-evaluation result
-    self._qp_sandbox_mode = False  # Whether to execute in sandbox
-    self._qp_raw_params = {}  # Set per-call by check_permissions
+    self._qp_invocation_state = ContextVar(
+        f"qwenpaw_policy_invocation_{id(self)}",
+        default=None,
+    )
 
 
-def _build_tc_spec(self: Any) -> ToolCallSpec:
-    """Build ToolCallSpec from instance fields + dynamic target."""
+def _build_tc_spec(
+    self: Any,
+    params: dict[str, Any] | None = None,
+) -> ToolCallSpec:
+    """Build ToolCallSpec from invocation-local params + target."""
     governor = self._qp_governor
-    params = getattr(self, "_qp_raw_params", {})
+    if params is None:
+        invocation = self._qp_invocation_state.get()
+        params = invocation.raw_params if invocation is not None else {}
     tool_name = DEFAULT_REGISTRY.python_to_policy_name(
         getattr(self, "name", "Unknown"),
     )
@@ -185,8 +205,12 @@ def _build_tc_spec(self: Any) -> ToolCallSpec:
     )
 
 
-def _prepare_off_mode_sandbox(tool: Any, governor: Any) -> None:
-    """Compile+attach a ``sandbox_config`` for fail-closed tools in OFF mode.
+def _prepare_off_mode_sandbox(
+    tool: Any,
+    governor: Any,
+    invocation: _PolicyInvocationState | None = None,
+) -> _PolicyInvocationState:
+    """Compile an invocation-local sandbox config in OFF mode.
 
     ``approval_level=OFF`` short-circuits the policy pipeline to ALLOW-all,
     which normally also skips the ``SANDBOX_FALLBACK`` branch that compiles a
@@ -212,27 +236,23 @@ def _prepare_off_mode_sandbox(tool: Any, governor: Any) -> None:
     like it is on the normal policy path (see
     :meth:`ResourceGovernor._sandbox_usable`).
     """
-    # These attributes live on a reusable FunctionTool wrapper, but describe
-    # one invocation only.  Clear any previous decision before consulting the
-    # current switch so a hot toggle (or a failed recompile) cannot reuse a
-    # stale sandbox config from an earlier call.
-    for attr in ("_qp_sandbox_mode", "_qp_sandbox_config"):
-        if hasattr(tool, attr):
-            delattr(tool, attr)
+    invocation = invocation or _PolicyInvocationState()
+    invocation.sandbox_mode = False
+    invocation.sandbox_config = None
 
     if governor is None:
-        return
+        return invocation
     policy_name = DEFAULT_REGISTRY.python_to_policy_name(
         getattr(tool, "name", "Unknown"),
     )
     if not DEFAULT_REGISTRY.requires_sandbox(policy_name):
-        return
+        return invocation
     if not getattr(governor, "sandbox_usable", False):
-        return
+        return invocation
     try:
         tc_spec = tool._build_tc_spec()
-        tool._qp_sandbox_config = governor.compile_sandbox_config(tc_spec)
-        tool._qp_sandbox_mode = True
+        invocation.sandbox_config = governor.compile_sandbox_config(tc_spec)
+        invocation.sandbox_mode = True
     except Exception:
         # Leave sandbox_config unset; the tool's own fail-closed guard still
         # protects us — better a clean denial than an unsandboxed run.
@@ -240,6 +260,7 @@ def _prepare_off_mode_sandbox(tool: Any, governor: Any) -> None:
             "OFF-mode sandbox_config compilation failed for '%s'.",
             getattr(tool, "name", "Unknown"),
         )
+    return invocation
 
 
 # pylint: disable=too-many-return-statements
@@ -263,7 +284,8 @@ async def _policy_tool_check_permissions(
     del context
 
     governor = getattr(self, "_qp_governor", None)
-    self._qp_raw_params = input_data or {}
+    invocation = _PolicyInvocationState(raw_params=dict(input_data or {}))
+    self._qp_invocation_state.set(invocation)
 
     # ── Authoritative role-based mutation gate (runs FIRST) ──
     # A non-privileged member denied by the mutation guard must be rejected
@@ -302,7 +324,7 @@ async def _policy_tool_check_permissions(
         # violation and escalates to a recurring approval prompt OFF can
         # never resolve. So we still compile+attach the sandbox here; only
         # the "ask the user" step is skipped.
-        _prepare_off_mode_sandbox(self, governor)
+        _prepare_off_mode_sandbox(self, governor, invocation)
         return PermissionDecision(
             behavior=PermissionBehavior.ALLOW,
             message="governance: approval_level=off, all tools allowed.",
@@ -337,15 +359,15 @@ async def _policy_tool_check_permissions(
             ),
         )
 
-    tc_spec = self._build_tc_spec()
+    tc_spec = self._build_tc_spec(invocation.raw_params)
 
     decision = governor.assert_policy(tc_spec)
     governor.audit(tc_spec, decision)
 
-    # Cache the decision + tc_spec for __call__ to use
-    self._qp_policy_decision = decision
-    self._qp_tc_spec = tc_spec
-    self._qp_sandbox_mode = False
+    invocation.policy_decision = decision
+    invocation.tc_spec = tc_spec
+    invocation.sandbox_mode = False
+    invocation.sandbox_config = None
 
     if decision.action is GovernanceAction.ALLOW:
         return PermissionDecision(
@@ -359,16 +381,14 @@ async def _policy_tool_check_permissions(
         )
     elif decision.action is GovernanceAction.SANDBOX_FALLBACK:
         # Bash tool with no rule match → allow execution in sandbox
-        self._qp_sandbox_mode = True
-        self._qp_sandbox_config = decision.sandbox_config
+        invocation.sandbox_mode = True
+        invocation.sandbox_config = decision.sandbox_config
         return PermissionDecision(
             behavior=PermissionBehavior.ALLOW,
             message="governance: sandbox fallback.",
         )
     elif decision.action is GovernanceAction.ASK:
         # Requires user confirmation
-        self._qp_policy_decision = decision
-
         return await _ask_user_approval(
             governor=governor,
             tc_spec=tc_spec,
@@ -385,6 +405,18 @@ async def _policy_tool_check_permissions(
         )
 
 
+async def _policy_tool_execute(
+    self: Any,
+    **kwargs: Any,
+) -> Any:
+    """Execute with the final gate after middleware argument rewriting."""
+    from ..security.mutation_guard.tool_gate import (
+        execute_authorized_function_tool_call,
+    )
+
+    return await execute_authorized_function_tool_call(self, kwargs)
+
+
 async def _policy_tool_call(
     self: Any,
     *args: Any,
@@ -396,32 +428,15 @@ async def _policy_tool_call(
     request user approval.
     If the user approves, retry without sandbox.
     """
-    from ..runtime.tool_registry import ToolEffectSpec
-    from ..security.mutation_guard.tool_gate import (
-        authorize_tool_call_and_audit,
-        mutation_denied_tool_chunk,
+    request_context = getattr(self, "_qp_request_context", None) or {}
+    invocation = self._qp_invocation_state.get()
+    self._qp_invocation_state.set(None)
+    invocation = invocation or _PolicyInvocationState(
+        raw_params=dict(kwargs),
     )
 
-    request_context = getattr(self, "_qp_request_context", None) or {}
-    effect_spec = getattr(self, "_qp_effect_spec", None) or ToolEffectSpec()
-
-    async def call_authorized(**call_kwargs: Any) -> Any:
-        """Run the role gate immediately before one real execution."""
-        mutation_decision = authorize_tool_call_and_audit(
-            request_context=request_context,
-            effect_spec=effect_spec,
-            input_data=call_kwargs,
-            tool_name=getattr(self, "name", ""),
-        )
-        if not mutation_decision.allowed:
-            return mutation_denied_tool_chunk(mutation_decision)
-        from agentscope.tool import FunctionTool
-
-        return await FunctionTool.__call__(self, **call_kwargs)
-
-    sandbox_mode = getattr(self, "_qp_sandbox_mode", False)
-    if sandbox_mode:
-        sandbox_config = getattr(self, "_qp_sandbox_config", None)
+    if invocation.sandbox_mode:
+        sandbox_config = invocation.sandbox_config
         if sandbox_config is not None:
             kwargs["sandbox_config"] = sandbox_config
 
@@ -433,7 +448,9 @@ async def _policy_tool_call(
         from agentscope.tool import FunctionTool
 
         return await FunctionTool.__call__(self, *args, **kwargs)
-    result = await call_authorized(**kwargs)
+    from agentscope.tool import FunctionTool
+
+    result = await FunctionTool.__call__(self, **kwargs)
 
     if (
         isinstance(result, ToolChunk)
@@ -486,19 +503,18 @@ async def _policy_tool_call(
         )
 
     # Trigger approval flow — reuse tc_spec from check_permissions
-    tc_spec = getattr(self, "_qp_tc_spec", None)
+    tc_spec = invocation.tc_spec
     if tc_spec is None:
         # Fallback: reconstruct if check_permissions didn't run
-        self._qp_raw_params = {}
-        tc_spec = self._build_tc_spec()
+        tc_spec = self._build_tc_spec(invocation.raw_params)
 
     governance_reason = getattr(
-        getattr(self, "_qp_policy_decision", None),
+        invocation.policy_decision,
         "reason",
         None,
     )
     governance_source = getattr(
-        getattr(self, "_qp_policy_decision", None),
+        invocation.policy_decision,
         "source",
         "No rule hit",
     )
@@ -535,8 +551,9 @@ async def _policy_tool_call(
             getattr(self, "name", "Unknown"),
         )
         kwargs.pop("sandbox_config", None)
-        self._qp_sandbox_mode = False
-        return await call_authorized(**kwargs)
+        invocation.sandbox_mode = False
+        invocation.sandbox_config = None
+        return await FunctionTool.__call__(self, **kwargs)
     else:
         # User denied: return the violation as DENIED
         return ToolChunk(

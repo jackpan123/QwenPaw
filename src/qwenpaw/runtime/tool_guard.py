@@ -48,7 +48,7 @@ class GuardedFunctionTool:
                         _guarded_tool_resolve_execution_level
                     ),
                     "check_permissions": _guarded_tool_check_permissions,
-                    "__call__": _guarded_tool_call,
+                    "call": _guarded_tool_execute,
                     "__doc__": cls.__doc__,
                 },
             )
@@ -136,35 +136,16 @@ def _with_no_retry_instruction(body: str) -> str:
     return body + _NO_RETRY_INSTRUCTION
 
 
-async def _guarded_tool_call(
+async def _guarded_tool_execute(
     self: Any,
-    *args: Any,
     **kwargs: Any,
 ) -> Any:
-    """Enforce the role gate at the final tool execution boundary."""
-    from agentscope.tool import FunctionTool
-
-    if args:
-        return await FunctionTool.__call__(self, *args, **kwargs)
-
-    from .tool_registry import ToolEffectSpec
+    """Execute with the final gate after middleware argument rewriting."""
     from ..security.mutation_guard.tool_gate import (
-        authorize_tool_call_and_audit,
-        mutation_denied_tool_chunk,
+        execute_authorized_function_tool_call,
     )
 
-    request_context = getattr(self, "_qp_request_context", None) or {}
-    decision = authorize_tool_call_and_audit(
-        request_context=request_context,
-        effect_spec=(
-            getattr(self, "_qp_effect_spec", None) or ToolEffectSpec()
-        ),
-        input_data=kwargs,
-        tool_name=getattr(self, "name", ""),
-    )
-    if not decision.allowed:
-        return mutation_denied_tool_chunk(decision)
-    return await FunctionTool.__call__(self, **kwargs)
+    return await execute_authorized_function_tool_call(self, kwargs)
 
 
 # pylint: disable=too-many-return-statements

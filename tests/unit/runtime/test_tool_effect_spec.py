@@ -7,7 +7,10 @@ tool is READ for ``snapshot`` but EXTERNAL_SIDE_EFFECT for ``click``).
 :class:`ActionEffect`, falling back to ``default`` when no selector is
 configured or the value is unrecognised.
 """
+
 from __future__ import annotations
+
+import pytest
 
 from qwenpaw.runtime.tool_registry import ToolEffectSpec
 from qwenpaw.security.mutation_guard import ActionEffect
@@ -114,3 +117,25 @@ class TestDefaultWithoutSelector:
         spec = ToolEffectSpec()
         assert spec.default is ActionEffect.UNKNOWN
         assert spec.resolve(None) is ActionEffect.UNKNOWN
+
+
+@pytest.mark.parametrize(
+    ("read_values", "mutate_values", "external_values"),
+    [
+        (("same",), ("SAME",), ()),
+        (("same",), (), ("Same",)),
+        ((), ("same",), ("SAME",)),
+    ],
+)
+def test_conflicting_selector_values_are_rejected(
+    read_values,
+    mutate_values,
+    external_values,
+) -> None:
+    with pytest.raises(ValueError, match="conflicting effect values"):
+        ToolEffectSpec(
+            selector_param="action",
+            read_values=read_values,
+            mutate_values=mutate_values,
+            external_values=external_values,
+        )

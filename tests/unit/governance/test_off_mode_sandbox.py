@@ -6,6 +6,7 @@ sandbox". These tests pin that only fail-closed tools (the REPL) get a
 sandbox_config compiled in OFF mode, that fail-open shell tools (Bash) are
 left untouched, and that no sandbox platform → no-op.
 """
+
 from __future__ import annotations
 
 # pylint: disable=protected-access
@@ -63,12 +64,11 @@ class TestOffModeSandbox:
         tool = _FakeTool("recall_history_python")
         gov = _FakeGovernor(sandbox_available=True)
 
-        tool_adapter._prepare_off_mode_sandbox(tool, gov)
+        state = tool_adapter._prepare_off_mode_sandbox(tool, gov)
 
-        assert tool._qp_sandbox_mode is True
+        assert state.sandbox_mode is True
         assert (
-            tool._qp_sandbox_config
-            == "sandbox-cfg-for-tc:recall_history_python"
+            state.sandbox_config == "sandbox-cfg-for-tc:recall_history_python"
         )
         assert gov.compiled, "compile_sandbox_config was never called"
 
@@ -77,10 +77,10 @@ class TestOffModeSandbox:
         tool = _FakeTool("execute_shell_command")
         gov = _FakeGovernor(sandbox_available=True)
 
-        tool_adapter._prepare_off_mode_sandbox(tool, gov)
+        state = tool_adapter._prepare_off_mode_sandbox(tool, gov)
 
-        assert not hasattr(tool, "_qp_sandbox_mode")
-        assert not hasattr(tool, "_qp_sandbox_config")
+        assert state.sandbox_mode is False
+        assert state.sandbox_config is None
         assert not gov.compiled
 
     def test_no_sandbox_platform_is_noop(self):
@@ -88,10 +88,10 @@ class TestOffModeSandbox:
         tool = _FakeTool("recall_history_python")
         gov = _FakeGovernor(sandbox_available=False)
 
-        tool_adapter._prepare_off_mode_sandbox(tool, gov)
+        state = tool_adapter._prepare_off_mode_sandbox(tool, gov)
 
-        assert not hasattr(tool, "_qp_sandbox_mode")
-        assert not hasattr(tool, "_qp_sandbox_config")
+        assert state.sandbox_mode is False
+        assert state.sandbox_config is None
         assert not gov.compiled
 
     def test_sandbox_switch_off_is_noop(self):
@@ -105,10 +105,10 @@ class TestOffModeSandbox:
         tool = _FakeTool("recall_history_python")
         gov = _FakeGovernor(sandbox_available=True, sandbox_enabled=False)
 
-        tool_adapter._prepare_off_mode_sandbox(tool, gov)
+        state = tool_adapter._prepare_off_mode_sandbox(tool, gov)
 
-        assert not hasattr(tool, "_qp_sandbox_mode")
-        assert not hasattr(tool, "_qp_sandbox_config")
+        assert state.sandbox_mode is False
+        assert state.sandbox_config is None
         assert not gov.compiled
 
     def test_sandbox_switch_off_clears_previous_config(self):
@@ -118,21 +118,21 @@ class TestOffModeSandbox:
         tool = _FakeTool("recall_history_python")
         gov = _FakeGovernor(sandbox_available=True, sandbox_enabled=True)
 
-        tool_adapter._prepare_off_mode_sandbox(tool, gov)
-        assert tool._qp_sandbox_mode is True
-        assert hasattr(tool, "_qp_sandbox_config")
+        state = tool_adapter._prepare_off_mode_sandbox(tool, gov)
+        assert state.sandbox_mode is True
+        assert state.sandbox_config is not None
 
         gov._sandbox_enabled = False
-        tool_adapter._prepare_off_mode_sandbox(tool, gov)
+        state = tool_adapter._prepare_off_mode_sandbox(tool, gov, state)
 
-        assert not hasattr(tool, "_qp_sandbox_mode")
-        assert not hasattr(tool, "_qp_sandbox_config")
+        assert state.sandbox_mode is False
+        assert state.sandbox_config is None
         assert len(gov.compiled) == 1
 
     def test_no_governor_is_noop(self):
         tool = _FakeTool("recall_history_python")
-        tool_adapter._prepare_off_mode_sandbox(tool, None)
-        assert not hasattr(tool, "_qp_sandbox_mode")
+        state = tool_adapter._prepare_off_mode_sandbox(tool, None)
+        assert state.sandbox_mode is False
 
     def test_compile_failure_leaves_config_unset(self):
         """A compile error must fail closed, not run unsandboxed."""
@@ -144,11 +144,12 @@ class TestOffModeSandbox:
         tool = _FakeTool("recall_history_python")
         gov = _BoomGovernor(sandbox_available=True)
 
-        tool_adapter._prepare_off_mode_sandbox(tool, gov)
+        state = tool_adapter._prepare_off_mode_sandbox(tool, gov)
 
         # sandbox_mode is only set AFTER a successful compile, so it stays
         # unset — the tool's own fail-closed guard then denies the call.
-        assert not hasattr(tool, "_qp_sandbox_mode")
+        assert state.sandbox_mode is False
+        assert state.sandbox_config is None
 
 
 class TestSandboxSwitchHotReload:
@@ -219,7 +220,7 @@ class TestSandboxSwitchHotReload:
         gov = self._governor_with_platform_sandbox(tmp_path)
         tool = _FakeTool("recall_history_python")
 
-        tool_adapter._prepare_off_mode_sandbox(tool, gov)
+        state = tool_adapter._prepare_off_mode_sandbox(tool, gov)
 
-        assert not hasattr(tool, "_qp_sandbox_mode")
-        assert not hasattr(tool, "_qp_sandbox_config")
+        assert state.sandbox_mode is False
+        assert state.sandbox_config is None

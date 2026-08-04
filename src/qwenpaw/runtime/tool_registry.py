@@ -36,6 +36,34 @@ class ToolEffectSpec:
     read_values: tuple[str, ...] = ()
     mutate_values: tuple[str, ...] = ()
     external_values: tuple[str, ...] = ()
+    _read_value_set: frozenset[str] = field(
+        init=False,
+        repr=False,
+        compare=False,
+    )
+    _mutate_value_set: frozenset[str] = field(
+        init=False,
+        repr=False,
+        compare=False,
+    )
+    _external_value_set: frozenset[str] = field(
+        init=False,
+        repr=False,
+        compare=False,
+    )
+
+    def __post_init__(self) -> None:
+        """Precompute normalized selectors and reject ambiguous effects."""
+        read = frozenset(item.casefold() for item in self.read_values)
+        mutate = frozenset(item.casefold() for item in self.mutate_values)
+        external = frozenset(item.casefold() for item in self.external_values)
+        conflicts = (read & mutate) | (read & external) | (mutate & external)
+        if conflicts:
+            values = ", ".join(sorted(conflicts))
+            raise ValueError(f"conflicting effect values: {values}")
+        object.__setattr__(self, "_read_value_set", read)
+        object.__setattr__(self, "_mutate_value_set", mutate)
+        object.__setattr__(self, "_external_value_set", external)
 
     def resolve(self, params: dict[str, Any] | None) -> ActionEffect:
         """Resolve the effect for one concrete invocation."""
@@ -44,11 +72,11 @@ class ToolEffectSpec:
         value = str((params or {}).get(self.selector_param) or "").casefold()
         if not value:
             return self.default
-        if value in {item.casefold() for item in self.read_values}:
+        if value in self._read_value_set:
             return ActionEffect.READ
-        if value in {item.casefold() for item in self.mutate_values}:
+        if value in self._mutate_value_set:
             return ActionEffect.MUTATE
-        if value in {item.casefold() for item in self.external_values}:
+        if value in self._external_value_set:
             return ActionEffect.EXTERNAL_SIDE_EFFECT
         return self.default
 

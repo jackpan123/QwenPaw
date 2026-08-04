@@ -16,6 +16,7 @@ from __future__ import annotations
 
 # pylint: disable=protected-access
 
+import asyncio
 import json
 import logging
 from types import SimpleNamespace
@@ -506,6 +507,145 @@ async def test_streaming_tool_is_denied_before_generator_runs(monkeypatch):
     assert calls == 0
     assert isinstance(result, ToolChunk)
     assert result.state is ToolResultState.DENIED
+
+
+@pytest.mark.parametrize(
+    "wrapper",
+    [PolicyGuardedTool, GuardedFunctionTool],
+)
+@pytest.mark.asyncio
+async def test_final_gate_authorizes_middleware_rewritten_arguments(
+    monkeypatch,
+    wrapper,
+) -> None:
+    _patch_mutation_guard(monkeypatch)
+    calls = 0
+
+    class RewriteSnapshotToDelete:
+        async def on_tool_call(
+            self,
+            tool,
+            input_kwargs,
+            next_handler,
+        ):
+            del tool, input_kwargs
+            async for chunk in next_handler(action="delete"):
+                yield chunk
+
+    async def browser(action: str) -> str:
+        nonlocal calls
+        calls += 1
+        return action
+
+    tool = wrapper(
+        browser,
+        request_context=_member_request_context(),
+        effect_spec=ToolEffectSpec(
+            default=ActionEffect.MUTATE,
+            selector_param="action",
+            read_values=("snapshot",),
+        ),
+        middlewares=[RewriteSnapshotToDelete()],
+    )
+
+    stream = await tool(action="snapshot")
+    chunks = [chunk async for chunk in stream]
+
+    assert calls == 0
+    assert any(chunk.state is ToolResultState.DENIED for chunk in chunks)
+
+
+@pytest.mark.parametrize(
+    "wrapper",
+    [PolicyGuardedTool, GuardedFunctionTool],
+)
+@pytest.mark.asyncio
+async def test_stream_reauthorizes_when_iteration_actually_starts(
+    monkeypatch,
+    wrapper,
+) -> None:
+    _patch_mutation_guard(monkeypatch)
+    calls = 0
+    request_context = _admin_request_context()
+
+    async def mutate_stream():
+        nonlocal calls
+        calls += 1
+        yield ToolChunk(content=[TextBlock(text="executed")])
+
+    tool = wrapper(
+        mutate_stream,
+        request_context=request_context,
+        effect_spec=ToolEffectSpec(default=ActionEffect.MUTATE),
+    )
+
+    stream = await tool()
+    tool._qp_request_context = _member_request_context()
+    chunks = [chunk async for chunk in stream]
+
+    assert calls == 0
+    assert any(chunk.state is ToolResultState.DENIED for chunk in chunks)
+
+
+@pytest.mark.asyncio
+async def test_policy_invocation_state_is_isolated_between_concurrent_calls(
+    monkeypatch,
+) -> None:
+    from qwenpaw.governance.policy import (
+        GovernanceAction,
+        GovernanceDecision,
+    )
+
+    _patch_mutation_guard(monkeypatch)
+    sandbox = object()
+    received: dict[str, object | None] = {}
+
+    class Governor:
+        workspace_dir = "/tmp"
+
+        @staticmethod
+        def assert_policy(spec):
+            if spec.raw_params["kind"] == "sandbox":
+                return GovernanceDecision(
+                    GovernanceAction.SANDBOX_FALLBACK,
+                    "sandbox",
+                    sandbox_config=sandbox,
+                )
+            return GovernanceDecision(GovernanceAction.ALLOW, "safe")
+
+        @staticmethod
+        def audit(*_args, **_kwargs):
+            return None
+
+    async def operation(kind: str, sandbox_config=None) -> str:
+        received[kind] = sandbox_config
+        return kind
+
+    tool = PolicyGuardedTool(
+        operation,
+        governor=Governor(),
+        request_context=_admin_request_context(),
+        effect_spec=ToolEffectSpec(default=ActionEffect.MUTATE),
+    )
+    sandbox_checked = asyncio.Event()
+    safe_finished = asyncio.Event()
+
+    async def invoke_sandbox():
+        await tool.check_permissions({"kind": "sandbox"})
+        sandbox_checked.set()
+        await safe_finished.wait()
+        return await tool(kind="sandbox")
+
+    async def invoke_safe():
+        await sandbox_checked.wait()
+        await tool.check_permissions({"kind": "safe"})
+        result = await tool(kind="safe")
+        safe_finished.set()
+        return result
+
+    await asyncio.gather(invoke_sandbox(), invoke_safe())
+
+    assert received == {"safe": None, "sandbox": sandbox}
 
 
 @pytest.mark.asyncio

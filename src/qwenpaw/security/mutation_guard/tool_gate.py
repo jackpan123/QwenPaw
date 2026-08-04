@@ -16,6 +16,7 @@ This keeps the gate invisible to local governance tests.
 
 from __future__ import annotations
 
+from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING, Any, cast
 
 from ...config.utils import load_config
@@ -110,3 +111,43 @@ def mutation_denied_tool_chunk(decision: MutationDecision) -> Any:
         ],
         metadata={"mutation_guard_denied": True},
     )
+
+
+async def execute_authorized_function_tool_call(
+    tool: Any,
+    input_data: dict[str, Any],
+) -> Any:
+    """Execute after middleware using real params and stream-time recheck."""
+    from agentscope.tool import FunctionTool
+
+    from ...runtime.tool_registry import ToolEffectSpec
+
+    def authorize() -> MutationDecision:
+        request_context = getattr(tool, "_qp_request_context", None) or {}
+        effect_spec = (
+            getattr(tool, "_qp_effect_spec", None) or ToolEffectSpec()
+        )
+        return authorize_tool_call_and_audit(
+            request_context=request_context,
+            effect_spec=effect_spec,
+            input_data=input_data,
+            tool_name=getattr(tool, "name", ""),
+        )
+
+    decision = authorize()
+    if not decision.allowed:
+        return mutation_denied_tool_chunk(decision)
+
+    result = await FunctionTool.call(tool, **input_data)
+    if not isinstance(result, AsyncGenerator):
+        return result
+
+    async def authorized_stream() -> AsyncGenerator[Any, None]:
+        stream_decision = authorize()
+        if not stream_decision.allowed:
+            yield mutation_denied_tool_chunk(stream_decision)
+            return
+        async for chunk in result:
+            yield chunk
+
+    return authorized_stream()
