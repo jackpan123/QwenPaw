@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import importlib
 from types import SimpleNamespace
+from typing import get_type_hints
 
 import pytest
 from agentscope.permission import (
@@ -12,7 +14,7 @@ from agentscope.permission import (
     PermissionMode,
 )
 from agentscope.state import AgentState
-from agentscope.tool import Toolkit
+from agentscope.tool import ToolChunk, ToolResponse, Toolkit
 
 from qwenpaw.agents.tools.run_tool_batch import run_tool_batch
 from qwenpaw.config.context import (
@@ -27,6 +29,16 @@ from qwenpaw.governance.policy import (
 from qwenpaw.runtime.tool_guard import GuardedFunctionTool
 from qwenpaw.runtime.tool_registry import ToolEffectSpec
 from qwenpaw.security.mutation_guard import ActionEffect, tool_gate
+
+
+def test_batch_helpers_accept_final_and_streaming_tool_responses() -> None:
+    module = importlib.import_module(
+        "qwenpaw.agents.tools.run_tool_batch",
+    )
+    result_type = ToolChunk | ToolResponse
+
+    assert get_type_hints(module._call_tool)["return"] == result_type
+    assert get_type_hints(module._response_payload)["response"] == result_type
 
 
 def _principal(role: str, *, can_mutate: bool) -> dict:

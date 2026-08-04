@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from collections.abc import AsyncGenerator
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -263,13 +264,45 @@ def _prepare_off_mode_sandbox(
     return invocation
 
 
-# pylint: disable=too-many-return-statements
 async def _policy_tool_check_permissions(
     self: Any,
     input_data: dict[str, Any] | None = None,
     context: Any = None,
     *_extra_args: Any,
     **_extra_kwargs: Any,
+) -> Any:
+    """Evaluate permissions and retain state only for final ALLOW."""
+    from agentscope.permission import PermissionBehavior
+
+    del _extra_args, _extra_kwargs
+
+    invocation = _PolicyInvocationState(raw_params=dict(input_data or {}))
+    self._qp_invocation_state.set(invocation)
+    try:
+        decision = await _evaluate_policy_tool_permissions(
+            self,
+            input_data,
+            context,
+            invocation,
+        )
+    except BaseException:
+        # CancelledError derives from BaseException on supported Python
+        # versions. Never retain raw_params or policy state after an
+        # exceptional permission evaluation.
+        self._qp_invocation_state.set(None)
+        raise
+
+    if decision.behavior is not PermissionBehavior.ALLOW:
+        self._qp_invocation_state.set(None)
+    return decision
+
+
+# pylint: disable=too-many-return-statements
+async def _evaluate_policy_tool_permissions(
+    self: Any,
+    input_data: dict[str, Any] | None,
+    context: Any,
+    invocation: _PolicyInvocationState,
 ) -> Any:
     """Perform governance policy evaluation for a tool call.
 
@@ -284,9 +317,6 @@ async def _policy_tool_check_permissions(
     del context
 
     governor = getattr(self, "_qp_governor", None)
-    invocation = _PolicyInvocationState(raw_params=dict(input_data or {}))
-    self._qp_invocation_state.set(invocation)
-
     # ── Authoritative role-based mutation gate (runs FIRST) ──
     # A non-privileged member denied by the mutation guard must be rejected
     # even when approval_level=off, so closing approval can never bypass
@@ -440,9 +470,6 @@ async def _policy_tool_call(
         if sandbox_config is not None:
             kwargs["sandbox_config"] = sandbox_config
 
-    # Call the original function
-    from agentscope.message import ToolResultState
-
     if args:
         # Preserve FunctionTool's keyword-only contract for positional calls.
         from agentscope.tool import FunctionTool
@@ -452,19 +479,89 @@ async def _policy_tool_call(
 
     result = await FunctionTool.__call__(self, **kwargs)
 
-    if (
+    if isinstance(result, AsyncGenerator):
+        return _policy_tool_stream(
+            self,
+            result,
+            invocation,
+            dict(kwargs),
+            request_context,
+        )
+
+    if _is_mutation_guard_denial(result):
+        return result
+
+    if not _is_sandbox_denial(result):
+        return result
+
+    return await _resolve_sandbox_violation(
+        self,
+        result,
+        invocation,
+        kwargs,
+        request_context,
+    )
+
+
+def _is_mutation_guard_denial(result: Any) -> bool:
+    """Return whether a denial came from the authoritative role gate."""
+    return (
         isinstance(result, ToolChunk)
         and isinstance(result.metadata, dict)
         and result.metadata.get("mutation_guard_denied") is True
-    ):
-        return result
+    )
 
-    # Check if sandbox violation was returned (state=DENIED)
-    if not (
+
+def _is_sandbox_denial(result: Any) -> bool:
+    """Return whether a result should enter sandbox approval fallback."""
+    from agentscope.message import ToolResultState
+
+    return (
         isinstance(result, ToolChunk)
         and result.state == ToolResultState.DENIED
-    ):
-        return result
+        and not _is_mutation_guard_denial(result)
+    )
+
+
+async def _policy_tool_stream(
+    self: Any,
+    stream: AsyncGenerator[Any, None],
+    invocation: _PolicyInvocationState,
+    kwargs: dict[str, Any],
+    request_context: dict[str, str],
+) -> AsyncGenerator[Any, None]:
+    """Preserve streamed chunks while handling an embedded sandbox denial."""
+    buffered: list[Any] = []
+    async for chunk in stream:
+        if _is_sandbox_denial(chunk):
+            resolved = await _resolve_sandbox_violation(
+                self,
+                chunk,
+                invocation,
+                kwargs,
+                request_context,
+            )
+            if isinstance(resolved, AsyncGenerator):
+                async for retry_chunk in resolved:
+                    yield retry_chunk
+            else:
+                yield resolved
+            return
+        buffered.append(chunk)
+
+    for chunk in buffered:
+        yield chunk
+
+
+async def _resolve_sandbox_violation(
+    self: Any,
+    result: ToolChunk,
+    invocation: _PolicyInvocationState,
+    kwargs: dict[str, Any],
+    request_context: dict[str, str],
+) -> Any:
+    """Ask once for a sandbox denial and optionally retry unsandboxed."""
+    from agentscope.message import ToolResultState
 
     # Extract violation message from metadata or content
     violation_msg = ""
@@ -553,6 +650,8 @@ async def _policy_tool_call(
         kwargs.pop("sandbox_config", None)
         invocation.sandbox_mode = False
         invocation.sandbox_config = None
+        from agentscope.tool import FunctionTool
+
         return await FunctionTool.__call__(self, **kwargs)
     else:
         # User denied: return the violation as DENIED
