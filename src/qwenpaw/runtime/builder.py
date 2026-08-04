@@ -87,6 +87,7 @@ class AgentBuilder:
 
         if memory_tools:
             from ..governance import PolicyGuardedTool
+            from .tool_registry import get_tool_effect_spec
 
             for fn in memory_tools:
                 tools.append(
@@ -94,6 +95,7 @@ class AgentBuilder:
                         fn,
                         governor=governor,
                         request_context=request_context,
+                        effect_spec=get_tool_effect_spec(fn),
                     ),
                 )
 
@@ -962,6 +964,9 @@ class AgentBuilder:
         governor: Any,
     ) -> Any:
         """Wrap a raw tool fn in the repo's standard guard (policy or tool)."""
+        from .tool_registry import get_tool_effect_spec
+
+        effect_spec = get_tool_effect_spec(fn)
         if governor is not None:
             from ..governance import PolicyGuardedTool
 
@@ -969,6 +974,7 @@ class AgentBuilder:
                 fn,
                 governor=governor,
                 request_context=request_context,
+                effect_spec=effect_spec,
             )
         from .tool_guard import GuardedFunctionTool
 
@@ -976,6 +982,7 @@ class AgentBuilder:
             fn,
             agent_id=agent_id,
             request_context=request_context,
+            effect_spec=effect_spec,
         )
 
     @staticmethod

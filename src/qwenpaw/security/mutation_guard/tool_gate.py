@@ -13,9 +13,10 @@ False, or ``principal.can_mutate`` is True, :func:`authorize_effect` already
 returns ``allowed`` — see :mod:`qwenpaw.security.mutation_guard.policy`.
 This keeps the gate invisible to local governance tests.
 """
+
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from ...config.utils import load_config
 from . import MutationDecision, RequestPrincipal, authorize_effect
@@ -24,6 +25,13 @@ if TYPE_CHECKING:
     from ...runtime.tool_registry import ToolEffectSpec
 
 _MUTATION_PERMISSION_DENIED = "mutation_permission_denied"
+
+
+def _context_dict(value: object | None) -> dict[str, Any]:
+    """Return only a real request-context dict."""
+    if type(value) is dict:
+        return cast(dict[str, Any], value)
+    return {}
 
 
 def authorize_tool_call(
@@ -39,8 +47,66 @@ def authorize_tool_call(
     actual call params, and delegates to :func:`authorize_effect`.
     """
     config = load_config().security.mutation_guard
-    principal = RequestPrincipal.from_context(
-        (request_context or {}).get("request_principal"),
-    )
+    context = _context_dict(request_context)
+    principal = RequestPrincipal.from_context(context.get("request_principal"))
     effect = effect_spec.resolve(input_data)
     return authorize_effect(principal, effect, config)
+
+
+def authorize_tool_call_and_audit(
+    *,
+    request_context: dict[str, Any] | None,
+    effect_spec: "ToolEffectSpec",
+    input_data: dict[str, Any] | None,
+    tool_name: str,
+) -> MutationDecision:
+    """Authorize a call and emit a parameter-free denial audit event."""
+    decision = authorize_tool_call(
+        request_context=request_context,
+        effect_spec=effect_spec,
+        input_data=input_data,
+    )
+    if decision.allowed:
+        return decision
+
+    from .audit import emit_mutation_audit
+
+    context = _context_dict(request_context)
+    principal = RequestPrincipal.from_context(context.get("request_principal"))
+    emit_mutation_audit(
+        "tool_denied",
+        tool=tool_name,
+        decision="deny",
+        reason=decision.reason,
+        user_id=principal.user_id,
+        roles=list(principal.roles),
+        source=principal.source,
+        agent_id=str(context.get("agent_id") or ""),
+        session_id=str(context.get("session_id") or ""),
+        channel=str(context.get("channel") or ""),
+    )
+    return decision
+
+
+def mutation_denial_message(decision: MutationDecision) -> str:
+    """Return the stable user-facing tool denial message."""
+    config = load_config().security.mutation_guard
+    return (
+        f"{config.deny_message} {_MUTATION_PERMISSION_DENIED} "
+        f"({decision.reason})"
+    )
+
+
+def mutation_denied_tool_chunk(decision: MutationDecision) -> Any:
+    """Build the terminal tool result used by every execution caller."""
+    from agentscope.message import TextBlock, ToolResultState
+    from agentscope.tool import ToolChunk
+
+    return ToolChunk(
+        is_last=True,
+        state=ToolResultState.DENIED,
+        content=[
+            TextBlock(type="text", text=mutation_denial_message(decision))
+        ],
+        metadata={"mutation_guard_denied": True},
+    )

@@ -6,6 +6,7 @@ languages whose servers were discovered at toolkit-creation time
 (see PROPOSAL §3.2).  Unsupported languages return an error string
 that nudges the agent toward ``grep_search`` / ``ast_search``.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -19,6 +20,8 @@ from agentscope.message import ToolResultState
 
 from ...config.context import get_current_workspace_dir
 from ...constant import WORKING_DIR
+from ...runtime.tool_registry import ToolDescriptor, ToolEffectSpec
+from ...security.mutation_guard import ActionEffect
 from . import _lsp_client as lsp_client
 from . import _lsp_servers as lsp_servers
 from .file_io import _resolve_file_path
@@ -247,9 +250,11 @@ def make_lsp_tool(  # noqa: C901  pylint: disable=too-many-statements
                 operation,
                 target_file,
                 line if operation in _OPERATIONS_REQUIRING_POSITION else None,
-                character
-                if operation in _OPERATIONS_REQUIRING_POSITION
-                else None,
+                (
+                    character
+                    if operation in _OPERATIONS_REQUIRING_POSITION
+                    else None
+                ),
                 query,
             )
 
@@ -273,4 +278,13 @@ def make_lsp_tool(  # noqa: C901  pylint: disable=too-many-statements
         return _make_response(_serialize(result))
 
     lsp.__doc__ = _build_description(frozen_available)
+    descriptor = ToolDescriptor(
+        name="lsp",
+        func=lsp,
+        async_execution=True,
+        description=lsp.__doc__.splitlines()[0],
+        effect=ToolEffectSpec(default=ActionEffect.READ),
+    )
+    # Dynamic per-workspace tool: attach metadata without global collection.
+    lsp._tool_descriptor = descriptor  # type: ignore[attr-defined]
     return lsp

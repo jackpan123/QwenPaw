@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """GuardedFunctionTool — permission-checked tool wrapper."""
+
 from __future__ import annotations
 
 import asyncio
@@ -47,6 +48,7 @@ class GuardedFunctionTool:
                         _guarded_tool_resolve_execution_level
                     ),
                     "check_permissions": _guarded_tool_check_permissions,
+                    "__call__": _guarded_tool_call,
                     "__doc__": cls.__doc__,
                 },
             )
@@ -65,7 +67,7 @@ def _guarded_tool_init(
 ) -> None:
     from agentscope.tool import FunctionTool
 
-    from .tool_registry import ToolEffectSpec
+    from .tool_registry import get_tool_effect_spec
 
     FunctionTool.__init__(self, func, **kwargs)
     self._qp_agent_id = agent_id  # pylint: disable=protected-access
@@ -74,7 +76,7 @@ def _guarded_tool_init(
     # Role-based side-effect model for the authoritative mutation gate.
     # Default UNKNOWN → fail-closed for unannotated tools.
     # pylint: disable=protected-access
-    self._qp_effect_spec = effect_spec or ToolEffectSpec()
+    self._qp_effect_spec = effect_spec or get_tool_effect_spec(func)
 
 
 def _guarded_tool_resolve_execution_level(self: Any) -> str:
@@ -134,6 +136,37 @@ def _with_no_retry_instruction(body: str) -> str:
     return body + _NO_RETRY_INSTRUCTION
 
 
+async def _guarded_tool_call(
+    self: Any,
+    *args: Any,
+    **kwargs: Any,
+) -> Any:
+    """Enforce the role gate at the final tool execution boundary."""
+    from agentscope.tool import FunctionTool
+
+    if args:
+        return await FunctionTool.__call__(self, *args, **kwargs)
+
+    from .tool_registry import ToolEffectSpec
+    from ..security.mutation_guard.tool_gate import (
+        authorize_tool_call_and_audit,
+        mutation_denied_tool_chunk,
+    )
+
+    request_context = getattr(self, "_qp_request_context", None) or {}
+    decision = authorize_tool_call_and_audit(
+        request_context=request_context,
+        effect_spec=(
+            getattr(self, "_qp_effect_spec", None) or ToolEffectSpec()
+        ),
+        input_data=kwargs,
+        tool_name=getattr(self, "name", ""),
+    )
+    if not decision.allowed:
+        return mutation_denied_tool_chunk(decision)
+    return await FunctionTool.__call__(self, **kwargs)
+
+
 # pylint: disable=too-many-return-statements
 async def _guarded_tool_check_permissions(
     self: Any,
@@ -175,39 +208,24 @@ async def _guarded_tool_check_permissions(
     # ``AgentBuilder._wrap_tool``); the gate applies here too so the role
     # restriction cannot be bypassed via the fallback path.
     from .tool_registry import ToolEffectSpec
-    from ..security.mutation_guard import emit_mutation_audit
-    from ..security.mutation_guard.tool_gate import authorize_tool_call
+    from ..security.mutation_guard.tool_gate import (
+        authorize_tool_call_and_audit,
+        mutation_denial_message,
+    )
 
     request_ctx = getattr(self, "_qp_request_context", None) or {}
-    mutation_decision = authorize_tool_call(
+    mutation_decision = authorize_tool_call_and_audit(
         request_context=request_ctx,
         effect_spec=(
             getattr(self, "_qp_effect_spec", None) or ToolEffectSpec()
         ),
         input_data=input_data,
+        tool_name=getattr(self, "name", ""),
     )
     if not mutation_decision.allowed:
-        tool_name = getattr(self, "name", "")
-        from ..config.utils import load_config
-
-        cfg = load_config().security.mutation_guard
-        emit_mutation_audit(
-            "tool_denied",
-            tool=tool_name,
-            reason=mutation_decision.reason,
-            user_id=str(
-                (request_ctx.get("request_principal") or {}).get(
-                    "user_id",
-                    "",
-                ),
-            ),
-        )
         return PermissionDecision(
             behavior=PermissionBehavior.DENY,
-            message=(
-                f"{cfg.deny_message} mutation_permission_denied "
-                f"({mutation_decision.reason})"
-            ),
+            message=mutation_denial_message(mutation_decision),
         )
 
     level = self._resolve_execution_level()  # pylint: disable=protected-access

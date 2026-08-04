@@ -20,6 +20,7 @@ _ALLOWED_FIELDS = frozenset(
         "agent_id",
         "session",
         "session_id",
+        "channel",
         "route",
         "tool",
         "decision",

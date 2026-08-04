@@ -53,6 +53,15 @@ class ToolEffectSpec:
         return self.default
 
 
+def get_tool_effect_spec(func: Any) -> ToolEffectSpec:
+    """Read effect metadata from a dynamic tool, defaulting fail-closed."""
+    descriptor = getattr(func, "_tool_descriptor", None)
+    effect = getattr(descriptor, "effect", None)
+    if isinstance(effect, ToolEffectSpec):
+        return effect
+    return ToolEffectSpec()
+
+
 # Maps the ``side_effect`` string on ``@tool_descriptor`` to an
 # ``ActionEffect``. Default "unknown" → UNKNOWN so unannotated tools are
 # fail-closed for non-privileged members.
@@ -395,6 +404,7 @@ __all__ = [
     "ToolGovernanceSpec",
     "ToolUISpec",
     "ToolRegistry",
+    "get_tool_effect_spec",
     "get_builtin_tool_funcs",
     "tool_descriptor",
 ]

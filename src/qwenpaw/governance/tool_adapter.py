@@ -151,14 +151,14 @@ def _policy_tool_init(
 ) -> None:
     from agentscope.tool import FunctionTool
 
-    from ..runtime.tool_registry import ToolEffectSpec
+    from ..runtime.tool_registry import get_tool_effect_spec
 
     FunctionTool.__init__(self, func, **kwargs)
     self._qp_governor = governor
     self._qp_request_context = request_context or {}
     # Role-based side-effect model for the authoritative mutation gate.
     # Default UNKNOWN → fail-closed for unannotated tools.
-    self._qp_effect_spec = effect_spec or ToolEffectSpec()
+    self._qp_effect_spec = effect_spec or get_tool_effect_spec(func)
     self._qp_policy_decision = None  # Pre-evaluation result
     self._qp_sandbox_mode = False  # Whether to execute in sandbox
     self._qp_raw_params = {}  # Set per-call by check_permissions
@@ -272,39 +272,24 @@ async def _policy_tool_check_permissions(
     # operation (no request_principal, or principal not guarded, or
     # principal.can_mutate) — authorize_effect returns allowed then.
     from ..runtime.tool_registry import ToolEffectSpec
-    from ..security.mutation_guard import emit_mutation_audit
-    from ..security.mutation_guard.tool_gate import authorize_tool_call
+    from ..security.mutation_guard.tool_gate import (
+        authorize_tool_call_and_audit,
+        mutation_denial_message,
+    )
 
     request_ctx = getattr(self, "_qp_request_context", None) or {}
-    mutation_decision = authorize_tool_call(
+    mutation_decision = authorize_tool_call_and_audit(
         request_context=request_ctx,
         effect_spec=(
             getattr(self, "_qp_effect_spec", None) or ToolEffectSpec()
         ),
         input_data=input_data,
+        tool_name=getattr(self, "name", ""),
     )
     if not mutation_decision.allowed:
-        tool_name = getattr(self, "name", "")
-        from ..config.utils import load_config
-
-        cfg = load_config().security.mutation_guard
-        emit_mutation_audit(
-            "tool_denied",
-            tool=tool_name,
-            reason=mutation_decision.reason,
-            user_id=str(
-                (request_ctx.get("request_principal") or {}).get(
-                    "user_id",
-                    "",
-                ),
-            ),
-        )
         return PermissionDecision(
             behavior=PermissionBehavior.DENY,
-            message=(
-                f"{cfg.deny_message} mutation_permission_denied "
-                f"({mutation_decision.reason})"
-            ),
+            message=mutation_denial_message(mutation_decision),
         )
 
     # ── Effective approval_level check (session > agent) ──
@@ -411,6 +396,29 @@ async def _policy_tool_call(
     request user approval.
     If the user approves, retry without sandbox.
     """
+    from ..runtime.tool_registry import ToolEffectSpec
+    from ..security.mutation_guard.tool_gate import (
+        authorize_tool_call_and_audit,
+        mutation_denied_tool_chunk,
+    )
+
+    request_context = getattr(self, "_qp_request_context", None) or {}
+    effect_spec = getattr(self, "_qp_effect_spec", None) or ToolEffectSpec()
+
+    async def call_authorized(**call_kwargs: Any) -> Any:
+        """Run the role gate immediately before one real execution."""
+        mutation_decision = authorize_tool_call_and_audit(
+            request_context=request_context,
+            effect_spec=effect_spec,
+            input_data=call_kwargs,
+            tool_name=getattr(self, "name", ""),
+        )
+        if not mutation_decision.allowed:
+            return mutation_denied_tool_chunk(mutation_decision)
+        from agentscope.tool import FunctionTool
+
+        return await FunctionTool.__call__(self, **call_kwargs)
+
     sandbox_mode = getattr(self, "_qp_sandbox_mode", False)
     if sandbox_mode:
         sandbox_config = getattr(self, "_qp_sandbox_config", None)
@@ -418,10 +426,21 @@ async def _policy_tool_call(
             kwargs["sandbox_config"] = sandbox_config
 
     # Call the original function
-    from agentscope.tool import FunctionTool
     from agentscope.message import ToolResultState
 
-    result = await FunctionTool.__call__(self, *args, **kwargs)
+    if args:
+        # Preserve FunctionTool's keyword-only contract for positional calls.
+        from agentscope.tool import FunctionTool
+
+        return await FunctionTool.__call__(self, *args, **kwargs)
+    result = await call_authorized(**kwargs)
+
+    if (
+        isinstance(result, ToolChunk)
+        and isinstance(result.metadata, dict)
+        and result.metadata.get("mutation_guard_denied") is True
+    ):
+        return result
 
     # Check if sandbox violation was returned (state=DENIED)
     if not (
@@ -452,8 +471,6 @@ async def _policy_tool_call(
     )
 
     governor = getattr(self, "_qp_governor", None)
-    request_context = getattr(self, "_qp_request_context", {}) or {}
-
     if governor is None:
         # No governor, can't approve — return the violation as DENIED
         return ToolChunk(
@@ -519,7 +536,7 @@ async def _policy_tool_call(
         )
         kwargs.pop("sandbox_config", None)
         self._qp_sandbox_mode = False
-        return await FunctionTool.__call__(self, *args, **kwargs)
+        return await call_authorized(**kwargs)
     else:
         # User denied: return the violation as DENIED
         return ToolChunk(
