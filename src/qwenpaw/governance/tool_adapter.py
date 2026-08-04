@@ -559,8 +559,11 @@ async def _policy_tool_stream(
                     request_context,
                 )
                 if isinstance(resolved, AsyncGenerator):
-                    async for retry_chunk in resolved:
-                        yield retry_chunk
+                    try:
+                        async for retry_chunk in resolved:
+                            yield retry_chunk
+                    finally:
+                        await resolved.aclose()
                 else:
                     yield resolved
                 return

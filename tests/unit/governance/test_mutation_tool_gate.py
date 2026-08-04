@@ -866,7 +866,14 @@ class _RetryFailure(RuntimeError):
 
 @pytest.mark.parametrize(
     "outcome",
-    ["approved", "rejected", "approval_error", "cancelled", "retry_error"],
+    [
+        "approved",
+        "rejected",
+        "approval_error",
+        "cancelled",
+        "retry_error",
+        "retry_cancelled",
+    ],
 )
 @pytest.mark.asyncio
 async def test_leading_sandbox_violation_always_closes_original_stream(
@@ -915,6 +922,8 @@ async def test_leading_sandbox_violation_always_closes_original_stream(
         try:
             if outcome == "retry_error":
                 raise _RetryFailure("retry failed")
+            if outcome == "retry_cancelled":
+                raise asyncio.CancelledError
             yield ToolChunk(content=[TextBlock(text="retry success")])
         finally:
             retry_closes += 1
@@ -947,6 +956,7 @@ async def test_leading_sandbox_violation_always_closes_original_stream(
         "approval_error": _ApprovalFailure,
         "cancelled": asyncio.CancelledError,
         "retry_error": _RetryFailure,
+        "retry_cancelled": asyncio.CancelledError,
     }.get(outcome)
     if expected_error is not None:
         with pytest.raises(expected_error):
@@ -957,7 +967,82 @@ async def test_leading_sandbox_violation_always_closes_original_stream(
         assert len(chunks) == 1
 
     assert original_closes == 1
-    assert retry_closes == (1 if outcome in {"approved", "retry_error"} else 0)
+    assert retry_closes == (
+        1 if outcome in {"approved", "retry_error", "retry_cancelled"} else 0
+    )
+
+
+@pytest.mark.asyncio
+async def test_consumer_close_during_retry_closes_both_streams(monkeypatch):
+    from agentscope.permission import PermissionBehavior, PermissionDecision
+    from qwenpaw.governance.policy import (
+        GovernanceAction,
+        GovernanceDecision,
+    )
+
+    _patch_mutation_guard(monkeypatch)
+    sandbox = object()
+    original_closes = 0
+    retry_closes = 0
+    keep_retry_open = asyncio.Event()
+
+    class Governor:
+        workspace_dir = "/tmp"
+
+        @staticmethod
+        def assert_policy(_spec):
+            return GovernanceDecision(
+                GovernanceAction.SANDBOX_FALLBACK,
+                "sandbox",
+                sandbox_config=sandbox,
+            )
+
+        @staticmethod
+        def audit(*_args, **_kwargs):
+            return None
+
+    async def operation(sandbox_config=None):
+        nonlocal original_closes, retry_closes
+        if sandbox_config is sandbox:
+            try:
+                yield ToolChunk(
+                    state=ToolResultState.DENIED,
+                    metadata={"sandbox_violation": "blocked"},
+                    content=[TextBlock(text="Sandbox violation: blocked")],
+                )
+            finally:
+                original_closes += 1
+            return
+
+        try:
+            yield ToolChunk(content=[TextBlock(text="retry first")])
+            await keep_retry_open.wait()
+            yield ToolChunk(content=[TextBlock(text="retry second")])
+        finally:
+            retry_closes += 1
+
+    async def approve(**_kwargs):
+        return PermissionDecision(
+            behavior=PermissionBehavior.ALLOW,
+            message="approved",
+        )
+
+    monkeypatch.setattr(tool_adapter, "_ask_user_approval", approve)
+    tool = PolicyGuardedTool(
+        operation,
+        governor=Governor(),
+        request_context=_admin_request_context(),
+        effect_spec=ToolEffectSpec(default=ActionEffect.MUTATE),
+    )
+    await tool.check_permissions({})
+    stream = await tool()
+
+    first = await anext(stream)
+    assert _tool_text(first) == "retry first"
+    await stream.aclose()
+
+    assert original_closes == 1
+    assert retry_closes == 1
 
 
 @pytest.mark.parametrize("approved", [True, False])
