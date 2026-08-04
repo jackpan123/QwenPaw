@@ -66,7 +66,7 @@ class DriverInvocation:
 
     capability_id: str
     payload: dict[str, Any]
-    request_context: dict[str, str] = field(default_factory=dict)
+    request_context: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

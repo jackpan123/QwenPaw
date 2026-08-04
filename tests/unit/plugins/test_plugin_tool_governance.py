@@ -13,20 +13,28 @@ These tests run the deferred startup hook directly with the heavy
 dependencies (governance registry, tools module, agent config) stubbed so
 the descriptor wiring can be asserted in isolation.
 """
+
 from __future__ import annotations
 
 from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from agentscope.message import ToolResultState
 
+from qwenpaw.runtime.tool_guard import GuardedFunctionTool
+from qwenpaw.runtime.tool_registry import (
+    ToolEffectSpec,
+    ToolRegistry,
+    tool_descriptor,
+)
 from qwenpaw.security.mutation_guard import (
     ActionEffect,
     RequestPrincipal,
     authorize_effect,
 )
+from qwenpaw.security.mutation_guard import tool_gate
 from qwenpaw.config.config import MutationGuardConfig
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -59,11 +67,22 @@ def plugin_api(fresh_registry):
     return api
 
 
+def _patch_mutation_guard(monkeypatch: pytest.MonkeyPatch) -> None:
+    config = MagicMock()
+    config.security.mutation_guard = MutationGuardConfig(
+        enabled=True,
+        privileged_roles=["admin", "root"],
+        deny_message="Permission denied.",
+    )
+    monkeypatch.setattr(tool_gate, "load_config", lambda: config)
+
+
 def _run_register_tool_hook(
     plugin_api,
     monkeypatch: pytest.MonkeyPatch,
     tool_name: str,
     side_effect: str,
+    tool_func: Any = None,
 ) -> Any:
     """Call ``register_tool`` and run the resulting startup hook.
 
@@ -72,10 +91,14 @@ def _run_register_tool_hook(
     so the caller can inspect ``tool_func._tool_descriptor.effect``.
     """
 
-    async def fake_tool_func(**_kwargs):
-        return "ok"
+    if tool_func is None:
 
-    fake_tool_func.__name__ = tool_name
+        async def fake_tool_func(**_kwargs):
+            return "ok"
+
+        tool_func = fake_tool_func
+
+    tool_func.__name__ = tool_name
 
     # Stub the heavy collaborators so the startup hook can run standalone.
     monkeypatch.setattr(
@@ -108,7 +131,7 @@ def _run_register_tool_hook(
 
     plugin_api.register_tool(
         tool_name=tool_name,
-        tool_func=fake_tool_func,
+        tool_func=tool_func,
         description="governance test",
         enabled=True,
         tool_type="network",
@@ -122,7 +145,7 @@ def _run_register_tool_hook(
     assert register_hooks, "register_tool did not schedule a startup hook"
     register_hooks[-1].callback()
 
-    return fake_tool_func
+    return tool_func
 
 
 # ---------------------------------------------------------------------------
@@ -175,6 +198,156 @@ def test_register_tool_default_side_effect_is_unknown(
 
     desc = tool_func._tool_descriptor
     assert desc.effect.default is ActionEffect.UNKNOWN
+
+
+def test_register_tool_side_effect_overrides_decorator_and_preserves_fields(
+    plugin_api,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    @tool_descriptor(
+        name="decorated_plugin_tool",
+        enabled_by_default=False,
+        requires_modes=("coding",),
+        description="decorated description",
+        tool_type="internal",
+        ui_description="decorated ui",
+        side_effect="read",
+        custom_metadata="keep-me",
+    )
+    async def decorated_plugin_tool() -> str:
+        return "ok"
+
+    original = decorated_plugin_tool._tool_descriptor
+
+    _run_register_tool_hook(
+        plugin_api,
+        monkeypatch,
+        "decorated_plugin_tool",
+        side_effect="mutate",
+        tool_func=decorated_plugin_tool,
+    )
+
+    rebuilt = decorated_plugin_tool._tool_descriptor
+    assert rebuilt is not original
+    assert rebuilt.effect.default is ActionEffect.MUTATE
+    assert rebuilt.requires_modes == original.requires_modes
+    assert rebuilt.enabled_by_default is original.enabled_by_default
+    assert rebuilt.description == original.description
+    assert rebuilt.governance == original.governance
+    assert rebuilt.ui == original.ui
+    assert rebuilt.metadata == original.metadata
+
+
+def test_runtime_bridge_replaces_stale_effect_on_hot_reload() -> None:
+    from qwenpaw.plugins.api import _bridge_to_runtime
+
+    runtime_registry = ToolRegistry()
+    bootstrap: dict[str, list] = {"builtin_tool_funcs": []}
+
+    class Plugins:
+        tool_registry = runtime_registry
+
+    class Workspace:
+        agent_id = "default"
+        plugins = Plugins()
+
+    class Manager:
+        agents = {"default": Workspace()}
+        _bootstrap_kwargs = bootstrap
+
+    class Registry:
+        @staticmethod
+        def get_workspace_manager():
+            return Manager()
+
+    @tool_descriptor(side_effect="read")
+    async def hot_reload_tool() -> str:
+        return "ok"
+
+    mutate = ToolEffectSpec(default=ActionEffect.MUTATE)
+    read = ToolEffectSpec(default=ActionEffect.READ)
+
+    _bridge_to_runtime(
+        "hot_reload_tool",
+        hot_reload_tool,
+        True,
+        "hot reload",
+        Registry(),
+        effect=mutate,
+    )
+    stale = runtime_registry.get("hot_reload_tool")
+    assert stale is not None
+    assert stale.effect.default is ActionEffect.MUTATE
+
+    async def reloaded_tool() -> str:
+        return "reloaded"
+
+    reloaded_tool._tool_descriptor = stale
+
+    _bridge_to_runtime(
+        "hot_reload_tool",
+        reloaded_tool,
+        True,
+        "hot reload",
+        Registry(),
+        effect=read,
+    )
+    current = runtime_registry.get("hot_reload_tool")
+    assert current is not None
+    assert current is not stale
+    assert current.func is reloaded_tool
+    assert current.effect.default is ActionEffect.READ
+    assert bootstrap["builtin_tool_funcs"] == [reloaded_tool]
+
+
+@pytest.mark.parametrize(
+    ("side_effect", "decorated_effect", "expected_calls"),
+    [
+        ("mutate", "read", 0),
+        ("read", "mutate", 1),
+    ],
+)
+@pytest.mark.asyncio
+async def test_registered_side_effect_controls_real_runtime_wrapper(
+    plugin_api,
+    monkeypatch: pytest.MonkeyPatch,
+    side_effect,
+    decorated_effect,
+    expected_calls,
+) -> None:
+    _patch_mutation_guard(monkeypatch)
+    calls = 0
+
+    @tool_descriptor(side_effect=decorated_effect)
+    async def runtime_plugin_tool() -> str:
+        nonlocal calls
+        calls += 1
+        return "executed"
+
+    registered = _run_register_tool_hook(
+        plugin_api,
+        monkeypatch,
+        "runtime_plugin_tool",
+        side_effect=side_effect,
+        tool_func=runtime_plugin_tool,
+    )
+    tool = GuardedFunctionTool(
+        registered,
+        request_context={
+            "request_principal": {
+                "user_id": "member",
+                "roles": ["member"],
+                "source": "nocobase",
+                "guarded": True,
+                "can_mutate": False,
+            },
+        },
+    )
+
+    result = await tool()
+
+    assert calls == expected_calls
+    assert (result.state is ToolResultState.DENIED) is (expected_calls == 0)
 
 
 # ---------------------------------------------------------------------------

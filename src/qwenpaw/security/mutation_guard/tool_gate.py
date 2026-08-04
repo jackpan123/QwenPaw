@@ -61,6 +61,7 @@ def authorize_tool_call_and_audit(
     effect_spec: "ToolEffectSpec",
     input_data: dict[str, Any] | None,
     tool_name: str,
+    audit_event: str = "tool_denied",
 ) -> MutationDecision:
     """Authorize a call and emit a parameter-free denial audit event."""
     decision = authorize_tool_call(
@@ -76,7 +77,7 @@ def authorize_tool_call_and_audit(
     context = _context_dict(request_context)
     principal = RequestPrincipal.from_context(context.get("request_principal"))
     emit_mutation_audit(
-        "tool_denied",
+        audit_event,
         tool=tool_name,
         decision="deny",
         reason=decision.reason,

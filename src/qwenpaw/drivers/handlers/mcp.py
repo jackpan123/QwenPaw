@@ -53,10 +53,13 @@ class MCPDriverHandler(DriverHandler):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self._client: Any | None = None
-        self._capability_cache: tuple[
-            float,
-            list[DriverCapability],
-        ] | None = None
+        self._capability_cache: (
+            tuple[
+                float,
+                list[DriverCapability],
+            ]
+            | None
+        ) = None
 
     async def _setup(self) -> None:
         """Create and connect StdIOStatefulClient or HttpStatefulClient."""
@@ -330,8 +333,9 @@ def _mcp_tool_to_capability(
 ) -> DriverCapability:
     raw_tool = getattr(tool, "_tool", tool)
     name = str(getattr(raw_tool, "name", getattr(tool, "name", tool)))
-    if name.startswith(f"mcp__{driver_name}__"):
-        name = name[len(f"mcp__{driver_name}__") :]
+    tool_prefix = f"mcp__{driver_name}__"
+    if name.startswith(tool_prefix):
+        name = name.removeprefix(tool_prefix)
     display_namespace = _tool_namespace_from_display_name(
         display_name,
         fallback=driver_name,
@@ -366,7 +370,7 @@ def _mcp_tool_to_capability(
     annotations = getattr(raw_tool, "annotations", None) or getattr(
         tool, "annotations", None
     )
-    read_only = bool(getattr(annotations, "readOnlyHint", False))
+    read_only = getattr(annotations, "readOnlyHint", None) is True
     effect = ActionEffect.READ if read_only else ActionEffect.UNKNOWN
     return DriverCapability(
         # capability_id keeps the original MCP tool name (URL-encoded) so

@@ -158,11 +158,23 @@ def _bridge_to_runtime(
     ``effect`` in the authoritative mutation gate (Task 5).
     """
     import inspect
+    from dataclasses import replace
 
     from ..runtime.tool_registry import ToolDescriptor
 
     desc = getattr(tool_func, "_tool_descriptor", None)
-    if desc is None:
+    if desc is not None and effect is not None:
+        desc = replace(
+            desc,
+            name=tool_name,
+            func=tool_func,
+            effect=effect,
+        )
+        # register_tool(side_effect=...) is authoritative over decorator
+        # metadata and any descriptor retained across plugin hot reloads.
+        # All unrelated declarative fields are preserved by replace().
+        tool_func._tool_descriptor = desc  # type: ignore[attr-defined]
+    elif desc is None:
         is_async = inspect.iscoroutinefunction(tool_func)
         descriptor_kwargs: dict[str, Any] = {
             "name": tool_name,
@@ -332,8 +344,8 @@ class PluginApi:  # pylint: disable=too-many-public-methods
         self,
         plugin_id: str,
         config: Dict[str, Any],
-        manifest: Dict[str, Any] = None,
-    ):
+        manifest: Dict[str, Any] | None = None,
+    ) -> None:
         """Initialize plugin API.
 
         Args:
