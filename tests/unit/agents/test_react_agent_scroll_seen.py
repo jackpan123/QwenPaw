@@ -43,6 +43,7 @@ def make_agent(tracker: SeenTracker) -> QwenPawAgent:
     agent._context_manager = tracker
     agent._gate_pending_stop = None
     agent.model = SimpleNamespace(model_key=None)
+    agent.state = SimpleNamespace(context=[])
 
     async def stop_handlers(final_msg):
         return StopHandlerResult(
