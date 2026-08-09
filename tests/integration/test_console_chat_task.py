@@ -22,10 +22,12 @@ import threading
 import time
 from http.server import HTTPServer
 
+import httpx
 import pytest
 
 from helpers import (
     MOCK_LLM_PROVIDER_ID,
+    MOCK_LLM_RESPONSE,
     MockLLMHandler,
     default_http_timeout,
     register_mock_provider,
@@ -73,6 +75,19 @@ def _wait_task_finished(app_server, task_id, timeout):
         f"last={last_body} / logs={app_server.logs_tail()[-2000:]}",
     )
     return last_body
+
+
+def _drain_console_chat(app_server, body: dict) -> list[str]:
+    """Send a normal chat turn and fully drain its real SSE response."""
+    url = f"{app_server.base_url}/api/console/chat"
+    with app_server.client.stream(
+        "POST",
+        url,
+        json=body,
+        timeout=httpx.Timeout(20.0, read=20.0),
+    ) as response:
+        assert response.status_code == 200, app_server.logs_tail()
+        return [line for line in response.iter_lines() if line]
 
 
 # ================================================================== #
@@ -173,6 +188,81 @@ def test_chat_task_submit_registers_chat_and_completes(
         # its own default (currently "default").  Assert non-empty
         # rather than a specific value to remain robust.
         assert result.get("session_id"), result
+
+    finally:
+        unregister_mock_provider(app_server, provider_id)
+
+
+@pytest.mark.integration
+@pytest.mark.p0
+def test_console_chat_persists_history_and_generated_title(
+    app_server,
+    mock_llm,  # pylint: disable=redefined-outer-name
+) -> None:
+    """A normal read-only chat streams, persists history and auto-title."""
+    _srv, mock_url = mock_llm
+    unregister_mock_provider(app_server, MOCK_LLM_PROVIDER_ID)
+    provider_id = register_mock_provider(app_server, mock_url)
+    user_id = "integ-console-history-title"
+    session_id = "sub-integ-console-history-title"
+    body = {
+        "channel": "console",
+        "user_id": user_id,
+        "session_id": session_id,
+        "input": [
+            {
+                "role": "user",
+                "type": "message",
+                "content": [
+                    {"type": "text", "text": "Explain lunar eclipses"},
+                ],
+            },
+        ],
+    }
+    expected_title = MOCK_LLM_RESPONSE.rstrip(".")
+    try:
+        stream_lines = _drain_console_chat(app_server, body)
+        assert any(MOCK_LLM_RESPONSE in line for line in stream_lines)
+
+        title_deadline = time.time() + 10.0
+        chat = None
+        while time.time() < title_deadline:
+            chats_resp = app_server.api_request(
+                "GET",
+                "/api/chats",
+                params={"user_id": user_id, "channel": "console"},
+                timeout=_HTTP_TIMEOUT,
+            )
+            assert chats_resp.status_code == 200, app_server.logs_tail()
+            chat = next(
+                (
+                    item
+                    for item in chats_resp.json()
+                    if item.get("session_id") == session_id
+                ),
+                None,
+            )
+            if chat and chat.get("name") == expected_title:
+                break
+            time.sleep(0.2)
+        assert chat is not None
+        assert chat["name"] == expected_title
+
+        history_resp = app_server.api_request(
+            "GET",
+            f"/api/chats/{chat['id']}",
+            timeout=_HTTP_TIMEOUT,
+        )
+        assert history_resp.status_code == 200, app_server.logs_tail()
+        history = history_resp.json()
+        assert history["status"] == "idle"
+        assert {message.get("role") for message in history["messages"]} >= {
+            "user",
+            "assistant",
+        }
+        serialized_history = str(history["messages"])
+        assert "Explain lunar eclipses" in serialized_history
+        assert MOCK_LLM_RESPONSE in serialized_history
     finally:
         unregister_mock_provider(app_server, provider_id)
 

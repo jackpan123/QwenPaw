@@ -298,9 +298,7 @@ async def post_console_chat(
             ),
         )
 
-    is_reconnect = False
-    if isinstance(request_data, dict):
-        is_reconnect = request_data.get("reconnect") is True
+    is_reconnect = _read_request_field(request_data, "reconnect") is True
 
     if is_reconnect:
         queue = await tracker.attach(chat.id)
