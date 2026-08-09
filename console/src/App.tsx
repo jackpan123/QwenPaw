@@ -34,8 +34,9 @@ import { lazyImportWithRetry } from "./utils/lazyWithRetry";
 const LoginPage = lazyImportWithRetry("./pages/Login/index");
 import { authApi } from "./api/modules/auth";
 import { languageApi } from "./api/modules/language";
+import { useAuthorizationStore } from "./stores/authorizationStore";
 import { useUploadLimitStore } from "./stores/uploadLimitStore";
-import { getApiUrl, getApiToken, clearAuthToken } from "./api/config";
+import { getApiToken, clearAuthToken } from "./api/config";
 import CloseWindowPrompt from "./tauri/CloseWindowPrompt";
 import { isTauri } from "@tauri-apps/api/core";
 import { isDesktopTauriRuntime } from "./utils/openExternalLink";
@@ -73,38 +74,59 @@ function AuthGuard({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     let cancelled = false;
+    useAuthorizationStore.getState().reset();
     (async () => {
       try {
         const res = await authApi.getStatus();
         if (cancelled) return;
         if (!res.enabled) {
+          useAuthorizationStore.getState().setAuthorization({
+            authEnabled: false,
+            username: null,
+            roles: [],
+            canMutate: true,
+          });
           setStatus("ok");
           return;
         }
         const token = getApiToken();
         if (!token) {
+          useAuthorizationStore.getState().setAuthorization({
+            authEnabled: true,
+            username: null,
+            roles: [],
+            canMutate: false,
+          });
           setStatus("auth-required");
           return;
         }
         try {
-          const r = await fetch(getApiUrl("/auth/verify"), {
-            headers: { Authorization: `Bearer ${token}` },
-          });
+          const authorization = await authApi.verify();
           if (cancelled) return;
-          if (r.ok) {
-            setStatus("ok");
-          } else {
-            clearAuthToken();
-            setStatus("auth-required");
-          }
+          useAuthorizationStore.getState().setAuthorization({
+            authEnabled: true,
+            username: authorization.username,
+            roles: authorization.roles,
+            canMutate: authorization.can_mutate,
+          });
+          setStatus("ok");
         } catch {
           if (!cancelled) {
             clearAuthToken();
+            useAuthorizationStore.getState().reset();
             setStatus("auth-required");
           }
         }
       } catch {
-        if (!cancelled) setStatus("ok");
+        if (!cancelled) {
+          useAuthorizationStore.getState().setAuthorization({
+            authEnabled: true,
+            username: null,
+            roles: [],
+            canMutate: false,
+          });
+          setStatus("auth-required");
+        }
       }
     })();
     return () => {
@@ -153,7 +175,7 @@ function AppInner() {
         );
     }
     useUploadLimitStore.getState().fetch();
-  }, []);
+  }, [i18n]);
 
   useEffect(() => {
     const handleLanguageChanged = (lng: string) => {
@@ -169,7 +191,7 @@ function AppInner() {
     return () => {
       i18n.off("languageChanged", handleLanguageChanged);
     };
-  }, [i18n]);
+  }, [i18n, lang]);
 
   // Disable the default browser context menu in the Tauri desktop build so
   // users cannot open DevTools via right-click. DevTools is still available
@@ -203,7 +225,7 @@ function AppInner() {
         prefixCls="qwenpaw"
         locale={antdLocale}
         theme={{
-          ...(selectedTheme as any)?.theme,
+          ...(selectedTheme as { theme?: object }).theme,
           algorithm: isDark
             ? antdTheme.darkAlgorithm
             : antdTheme.defaultAlgorithm,

@@ -15,9 +15,8 @@ import styles from "./PushMessageCard.module.less";
 
 interface PushMessageCardProps {
   message: PushMessage;
-  onMarkAsRead: (id: string) => void;
   onView: (id: string) => void;
-  onDelete: (id: string) => void;
+  onDelete?: (id: string) => void;
   selected?: boolean;
   onSelectChange?: (id: string, checked: boolean) => void;
 }
@@ -104,26 +103,28 @@ export function PushMessageCard(props: PushMessageCardProps) {
               {message.metadata.priority.toUpperCase()}
             </Tag>
           ) : null}
-          <Popconfirm
-            title={t("inbox.deleteMessageConfirm")}
-            onConfirm={(event) => {
-              event?.stopPropagation();
-              onDelete(message.id);
-            }}
-            onCancel={(event) => {
-              event?.stopPropagation();
-            }}
-            okText={t("common.confirm")}
-            cancelText={t("common.cancel")}
-          >
-            <Button
-              size="small"
-              type="text"
-              danger
-              icon={<Trash2 size={14} />}
-              onClick={(event) => event.stopPropagation()}
-            />
-          </Popconfirm>
+          {onDelete ? (
+            <Popconfirm
+              title={t("inbox.deleteMessageConfirm")}
+              onConfirm={(event) => {
+                event?.stopPropagation();
+                onDelete(message.id);
+              }}
+              onCancel={(event) => {
+                event?.stopPropagation();
+              }}
+              okText={t("common.confirm")}
+              cancelText={t("common.cancel")}
+            >
+              <Button
+                size="small"
+                type="text"
+                danger
+                icon={<Trash2 size={14} />}
+                onClick={(event) => event.stopPropagation()}
+              />
+            </Popconfirm>
+          ) : null}
         </div>
       </div>
       <div className={styles.cardBody}>

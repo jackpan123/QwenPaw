@@ -43,6 +43,7 @@ import {
 import { useAppMessage } from "../../../../hooks/useAppMessage";
 import styles from "./index.module.less";
 import type { ChatStatus } from "../../../../api/types/chat";
+import { useAuthorizationStore } from "../../../../stores/authorizationStore";
 
 /** Fixed height of each session item row */
 const SESSION_ROW_HEIGHT = 77;
@@ -62,6 +63,7 @@ type FlatRow =
 
 /** Data passed to each virtual row */
 interface VirtualRowData {
+  canMutate: boolean;
   flatRows: FlatRow[];
   currentSessionId: string | undefined;
   switchingSessionId: string | null;
@@ -116,7 +118,7 @@ const VirtualRow = React.memo(function VirtualRow({
   const channelLabel = channelKey
     ? getChannelLabel(channelKey, data.t)
     : undefined;
-  const isEditing = data.editingSessionId === session.id;
+  const isEditing = data.canMutate && data.editingSessionId === session.id;
 
   return (
     <div style={style}>
@@ -142,13 +144,13 @@ const VirtualRow = React.memo(function VirtualRow({
         editing={isEditing}
         editValue={isEditing ? data.editValue : undefined}
         onClick={data.handleSessionClick}
-        onEdit={data.handleEditStart}
-        onDelete={data.handleDelete}
-        onPin={data.handlePinToggle}
-        onArchive={data.handleArchiveToggle}
-        onEditChange={data.handleEditChange}
-        onEditSubmit={data.handleEditSubmit}
-        onEditCancel={data.handleEditCancel}
+        onEdit={data.canMutate ? data.handleEditStart : undefined}
+        onDelete={data.canMutate ? data.handleDelete : undefined}
+        onPin={data.canMutate ? data.handlePinToggle : undefined}
+        onArchive={data.canMutate ? data.handleArchiveToggle : undefined}
+        onEditChange={data.canMutate ? data.handleEditChange : undefined}
+        onEditSubmit={data.canMutate ? data.handleEditSubmit : undefined}
+        onEditCancel={data.canMutate ? data.handleEditCancel : undefined}
       />
     </div>
   );
@@ -232,6 +234,7 @@ const ChatSessionDrawer: React.FC<ChatSessionDrawerProps> = (props) => {
   const location = useLocation();
   const sdkState = useChatAnywhereSessionsState();
   const { codingMode } = useCodingMode();
+  const canMutate = useAuthorizationStore((state) => state.canMutate);
 
   const createNewSession = useCreateNewSession();
 
@@ -441,6 +444,7 @@ const ChatSessionDrawer: React.FC<ChatSessionDrawerProps> = (props) => {
   /** Delete a session: call deleteChat API then refresh the list */
   const handleDelete = useCallback(
     async (sessionId: string) => {
+      if (!useAuthorizationStore.getState().canMutate) return;
       const session = sessions.find((s) => s.id === sessionId) as
         | ExtendedChatSession
         | undefined;
@@ -489,6 +493,7 @@ const ChatSessionDrawer: React.FC<ChatSessionDrawerProps> = (props) => {
   /** Enter rename mode for a session */
   const handleEditStart = useCallback(
     (sessionId: string, currentName: string) => {
+      if (!useAuthorizationStore.getState().canMutate) return;
       setEditingSessionId(sessionId);
       setEditValue(currentName);
     },
@@ -502,6 +507,7 @@ const ChatSessionDrawer: React.FC<ChatSessionDrawerProps> = (props) => {
 
   /** Submit rename */
   const handleEditSubmit = useCallback(async () => {
+    if (!useAuthorizationStore.getState().canMutate) return;
     if (!editingSessionId) return;
 
     const session = sessions.find((s) => s.id === editingSessionId) as
@@ -530,6 +536,7 @@ const ChatSessionDrawer: React.FC<ChatSessionDrawerProps> = (props) => {
   /** Toggle pin status for a session */
   const handlePinToggle = useCallback(
     async (sessionId: string) => {
+      if (!useAuthorizationStore.getState().canMutate) return;
       const session = sessions.find((s) => s.id === sessionId) as
         | ExtendedChatSession
         | undefined;
@@ -553,6 +560,7 @@ const ChatSessionDrawer: React.FC<ChatSessionDrawerProps> = (props) => {
   /** Toggle archive status for a session */
   const handleArchiveToggle = useCallback(
     async (sessionId: string) => {
+      if (!useAuthorizationStore.getState().canMutate) return;
       const session = sessions.find((s) => s.id === sessionId) as
         | ExtendedChatSession
         | undefined;
@@ -693,6 +701,7 @@ const ChatSessionDrawer: React.FC<ChatSessionDrawerProps> = (props) => {
   const virtualListData = useMemo(
     () => ({
       flatRows,
+      canMutate,
       currentSessionId,
       switchingSessionId,
       editingSessionId,
@@ -710,6 +719,7 @@ const ChatSessionDrawer: React.FC<ChatSessionDrawerProps> = (props) => {
     }),
     [
       flatRows,
+      canMutate,
       currentSessionId,
       switchingSessionId,
       editingSessionId,

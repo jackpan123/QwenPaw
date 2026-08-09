@@ -120,6 +120,7 @@ import {
 import { openExternalLink } from "../../utils/openExternalLink";
 import { getLastEditorCopy } from "../Coding/lastEditorCopy";
 import { useUploadLimitStore } from "../../stores/uploadLimitStore";
+import { useAuthorizationStore } from "../../stores/authorizationStore";
 import MessageQueuePanel from "./components/MessageQueuePanel";
 import ApprovalLevelToggle from "./components/ApprovalLevelToggle";
 import { useAgentRunningConfigApprovalLevel } from "../../hooks/useAgentRunningConfigApprovalLevel";
@@ -1138,6 +1139,7 @@ export default function ChatPage() {
   const codingModeRef = useRef(codingMode);
   codingModeRef.current = codingMode;
   const loopAvailableModes = useLoopStore((state) => state.availableModes);
+  const canMutate = useAuthorizationStore((state) => state.canMutate);
 
   // Wide mode toggle: expand chat content to full available width
   const [isWideMode, setIsWideMode] = useState(() => {
@@ -1987,7 +1989,7 @@ export default function ChatPage() {
         e.key.toLowerCase() === "m"
       ) {
         e.preventDefault();
-        if (whisperEnabled) {
+        if (whisperEnabled && useAuthorizationStore.getState().canMutate) {
           whisperSpeechRef.current?.toggleRecording();
         }
       }
@@ -2353,6 +2355,7 @@ export default function ChatPage() {
       onProgress?: (e: { percent?: number }) => void;
     }) => {
       const { file, onSuccess, onError, onProgress } = options;
+      if (!useAuthorizationStore.getState().canMutate) return;
       try {
         // Warn when model has no multimodal support
         if (!multimodalCaps.supportsMultimodal) {
@@ -2765,7 +2768,7 @@ export default function ChatPage() {
         ) : undefined,
         prefix: (
           <>
-            {whisperEnabled ? (
+            {whisperEnabled && canMutate ? (
               <WhisperSpeechButton
                 ref={whisperSpeechRef}
                 onTranscription={handleWhisperTranscription}
@@ -2796,42 +2799,52 @@ export default function ChatPage() {
             />
           </span>
         ),
-        attachments: {
-          multiple: true,
-          trigger: function (props: any) {
-            const uploadLimit = useUploadLimitStore.getState().uploadMaxSizeMb;
-            const tooltipKey = multimodalCaps.supportsMultimodal
-              ? multimodalCaps.supportsImage && !multimodalCaps.supportsVideo
-                ? "chat.attachments.tooltipImageOnly"
-                : "chat.attachments.tooltip"
-              : "chat.attachments.tooltipNoMultimodal";
-            const tooltipTitle =
-              uploadLimit !== null
-                ? `${t(tooltipKey)}, ${t("chat.attachments.fileSizeLimit", {
-                    limit: uploadLimit,
-                  })}`
-                : t(tooltipKey);
-            return (
-              <Tooltip title={tooltipTitle}>
-                <IconButton
-                  disabled={props?.disabled}
-                  icon={<SparkAttachmentLine />}
-                  bordered={false}
-                />
-              </Tooltip>
-            );
-          },
-          customRequest: handleFileUpload,
-        },
-        longTextUpload: {
-          ...((i18nConfig as any)?.sender?.longTextUpload ?? {}),
-          customRequest: handleFileUpload,
-          prompt: () =>
-            t(
-              "chat.longTextUploadPrompt",
-              "Please read the uploaded prompt file and answer it.",
-            ),
-        },
+        ...(canMutate
+          ? {
+              attachments: {
+                multiple: true,
+                trigger: function (props: any) {
+                  const uploadLimit =
+                    useUploadLimitStore.getState().uploadMaxSizeMb;
+                  const tooltipKey = multimodalCaps.supportsMultimodal
+                    ? multimodalCaps.supportsImage &&
+                      !multimodalCaps.supportsVideo
+                      ? "chat.attachments.tooltipImageOnly"
+                      : "chat.attachments.tooltip"
+                    : "chat.attachments.tooltipNoMultimodal";
+                  const tooltipTitle =
+                    uploadLimit !== null
+                      ? `${t(tooltipKey)}, ${t(
+                          "chat.attachments.fileSizeLimit",
+                          { limit: uploadLimit },
+                        )}`
+                      : t(tooltipKey);
+                  return (
+                    <Tooltip title={tooltipTitle}>
+                      <IconButton
+                        disabled={props?.disabled}
+                        icon={<SparkAttachmentLine />}
+                        bordered={false}
+                      />
+                    </Tooltip>
+                  );
+                },
+                customRequest: handleFileUpload,
+              },
+              longTextUpload: {
+                ...((i18nConfig as any)?.sender?.longTextUpload ?? {}),
+                customRequest: handleFileUpload,
+                prompt: () =>
+                  t(
+                    "chat.longTextUploadPrompt",
+                    "Please read the uploaded prompt file and answer it.",
+                  ),
+              },
+            }
+          : {
+              attachments: undefined,
+              longTextUpload: undefined,
+            }),
         placeholder: extPlaceholder ?? t("chat.inputPlaceholder"),
         ...(extDisclaimer !== undefined ? { disclaimer: extDisclaimer } : {}),
         suggestions: [...baseSuggestions, ...pluginSuggestions],
@@ -3038,6 +3051,7 @@ export default function ChatPage() {
     toggleHistoryPanel,
     handleCompactCommand,
     handleNewCommand,
+    canMutate,
   ]);
 
   return (

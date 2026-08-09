@@ -4,6 +4,7 @@ import type { TFunction } from "i18next";
 import api from "../../../api";
 import type { InboxEvent } from "../../../api/modules/console";
 import { useAgentStore } from "../../../stores/agentStore";
+import { useAuthorizationStore } from "../../../stores/authorizationStore";
 import {
   DEFAULT_AGENT_ID,
   getAgentDisplayName,
@@ -13,6 +14,8 @@ import type { HarvestInstance, InboxSummary, PushMessage } from "../types";
 const PUSH_POLLING_INTERVAL_MS = 6000;
 
 const MOCK_HARVESTS: HarvestInstance[] = [];
+
+const canMutateNow = (): boolean => useAuthorizationStore.getState().canMutate;
 
 const mapPriority = (text: string): "low" | "normal" | "high" | "urgent" => {
   if (text.includes("❌") || text.toLowerCase().includes("error")) {
@@ -233,6 +236,7 @@ export const useInboxData = () => {
   }, [loadPushMessages]);
 
   const markMessageAsRead = useCallback((messageId: string) => {
+    if (!canMutateNow()) return;
     void api.markInboxRead({ event_ids: [messageId] });
     setPushMessages((prev) =>
       prev.map((message) =>
@@ -249,6 +253,7 @@ export const useInboxData = () => {
   }, []);
 
   const markAllMessagesAsRead = useCallback(async (): Promise<number> => {
+    if (!canMutateNow()) return 0;
     const unreadIds = pushMessagesRef.current
       .filter((message) => !message.read)
       .map((m) => m.id);
@@ -272,6 +277,7 @@ export const useInboxData = () => {
   }, []);
 
   const deleteMessages = useCallback(async (messageIds: string[]) => {
+    if (!canMutateNow()) return 0;
     const ids = Array.from(
       new Set(messageIds.map((id) => id.trim()).filter(Boolean)),
     );
@@ -310,6 +316,7 @@ export const useInboxData = () => {
   );
 
   const triggerHarvest = useCallback((harvestId: string) => {
+    if (!canMutateNow()) return;
     console.info("triggerHarvest", harvestId);
   }, []);
 

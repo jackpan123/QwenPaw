@@ -17,7 +17,7 @@ afterEach(() => {
 
 function renderApprovalCard() {
   const onApprove = vi
-    .fn<ApprovalCardProps["onApprove"]>()
+    .fn<NonNullable<ApprovalCardProps["onApprove"]>>()
     .mockResolvedValue(undefined);
   renderCard({ onApprove });
   return onApprove;
@@ -54,6 +54,31 @@ function renderCard({
 }
 
 describe("ApprovalCard generalized approval", () => {
+  it("renders approval and timeout details without mutation buttons when callbacks are omitted", async () => {
+    const readOnlyProps = {
+      requestId: "approval-1",
+      toolName: "shell",
+      toolSource: "tool",
+      severity: "medium",
+      findingsCount: 0,
+      findingsSummary: "readable details",
+      toolParams: {},
+      createdAt: Date.now() / 1000 - 5,
+      timeoutSeconds: 1,
+      agentId: "default",
+      showInboxAgentContext: true,
+    } as ApprovalCardProps;
+
+    renderWithProviders(<ApprovalCard {...readOnlyProps} />);
+
+    expect(screen.getByText("shell")).toBeInTheDocument();
+    expect(
+      await screen.findByText("Timed out, auto denied"),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Deny" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
+  });
+
   it("prioritizes one-time approval without changing approval scopes", async () => {
     const onApprove = renderApprovalCard();
     const user = userEvent.setup();

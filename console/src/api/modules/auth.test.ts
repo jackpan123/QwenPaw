@@ -1,9 +1,17 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { authApi } from "./auth";
 
+const { mockBuildAuthHeaders } = vi.hoisted(() => ({
+  mockBuildAuthHeaders: vi.fn(() => ({ Authorization: "Bearer trusted" })),
+}));
+
 // auth.ts uses fetch directly (not the request wrapper), so mock global fetch
 vi.mock("../config", () => ({
   getApiUrl: (path: string) => `/api${path}`,
+}));
+
+vi.mock("../authHeaders", () => ({
+  buildAuthHeaders: mockBuildAuthHeaders,
 }));
 
 function mockFetch(status: number, body: unknown) {
@@ -38,7 +46,8 @@ describe("authApi.login", () => {
   it("request body contains username and password", async () => {
     mockFetch(200, { token: "tok", username: "alice" });
     await authApi.login("alice", "secret");
-    const body = JSON.parse((fetch as any).mock.calls[0][1].body);
+    const requestInit = vi.mocked(fetch).mock.calls[0][1];
+    const body = JSON.parse(String(requestInit?.body));
     expect(body).toEqual({ username: "alice", password: "secret" });
   });
 
@@ -75,5 +84,45 @@ describe("authApi.getStatus", () => {
     await expect(authApi.getStatus()).rejects.toThrow(
       "Failed to check auth status",
     );
+  });
+});
+
+describe("authApi.verify", () => {
+  afterEach(() => vi.clearAllMocks());
+
+  it("returns only the authorization claims supplied by the server", async () => {
+    mockFetch(200, {
+      valid: true,
+      username: "alice",
+      roles: ["member"],
+      can_mutate: false,
+    });
+
+    await expect(authApi.verify()).resolves.toEqual({
+      valid: true,
+      username: "alice",
+      roles: ["member"],
+      can_mutate: false,
+    });
+    expect(fetch).toHaveBeenCalledWith("/api/auth/verify", {
+      method: "GET",
+      headers: { Authorization: "Bearer trusted" },
+    });
+  });
+
+  it("throws the stable token error when verification fails", async () => {
+    mockFetch(401, { detail: "Invalid token" });
+
+    await expect(authApi.verify()).rejects.toThrow("Invalid or expired token");
+  });
+
+  it("throws the stable token error when an error response is not JSON", async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 401,
+      json: () => Promise.reject(new Error("not JSON")),
+    } as unknown as Response);
+
+    await expect(authApi.verify()).rejects.toThrow("Invalid or expired token");
   });
 });

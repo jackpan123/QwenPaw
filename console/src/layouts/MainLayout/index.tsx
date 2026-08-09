@@ -1,6 +1,12 @@
 import { Suspense, useMemo } from "react";
 import { Layout, Spin } from "antd";
-import { Routes, Route, useLocation, matchPath } from "react-router-dom";
+import {
+  Routes,
+  Route,
+  Navigate,
+  useLocation,
+  matchPath,
+} from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import Sidebar from "../Sidebar";
 import Header from "../Header";
@@ -10,7 +16,9 @@ import { ChunkErrorBoundary } from "../../components/ChunkErrorBoundary";
 import { useSyncCodingMode } from "../../stores/useSyncCodingMode";
 import styles from "../index.module.less";
 import { useRoutes } from "../../plugins/registry/hooks";
+import { filterRoutesForAuthorization } from "../../plugins/registry/store";
 import { Slot } from "../../plugins/registry/Slot";
+import { useAuthorizationStore } from "../../stores/authorizationStore";
 
 const { Content } = Layout;
 
@@ -36,14 +44,20 @@ export default function MainLayout() {
   const location = useLocation();
   const currentPath = location.pathname;
   const routes = useRoutes();
+  const canMutate = useAuthorizationStore((state) => state.canMutate);
+
+  const authorizedRoutes = useMemo(
+    () => filterRoutesForAuthorization(routes, canMutate),
+    [routes, canMutate],
+  );
 
   // Backend is the source of truth for Coding Mode state — refill the
   // in-memory store every time the selected agent changes.
   useSyncCodingMode();
 
   const selectedKey = useMemo(
-    () => pickSelectedKey(currentPath, routes),
-    [currentPath, routes],
+    () => pickSelectedKey(currentPath, authorizedRoutes),
+    [currentPath, authorizedRoutes],
   );
 
   // PawApp inline routes (`/apps/<id>`) are rendered *inside* the App Center
@@ -52,8 +66,8 @@ export default function MainLayout() {
   // we just skip them here. The App Center's own `/apps/:appId` route (with a
   // colon) is kept, so a deep-link / refresh lands on the App Center wrapper.
   const renderableRoutes = useMemo(
-    () => routes.filter((r) => !/^\/apps\/(?!:)/.test(r.path)),
-    [routes],
+    () => authorizedRoutes.filter((r) => !/^\/apps\/(?!:)/.test(r.path)),
+    [authorizedRoutes],
   );
 
   return (
@@ -79,6 +93,9 @@ export default function MainLayout() {
                   {renderableRoutes.map((r) => (
                     <Route key={r.id} path={r.path} element={<r.Component />} />
                   ))}
+                  {!canMutate && (
+                    <Route path="*" element={<Navigate to="/chat" replace />} />
+                  )}
                 </Routes>
               </Suspense>
             </ChunkErrorBoundary>

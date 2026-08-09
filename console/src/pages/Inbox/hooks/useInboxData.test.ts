@@ -16,6 +16,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { renderHook, act, waitFor } from "@testing-library/react";
 import type { InboxEvent } from "../../../api/modules/console";
+import { useAuthorizationStore } from "../../../stores/authorizationStore";
 
 const { stableT, mockGetInboxEvents, mockMarkInboxRead, mockDeleteInboxEvent } =
   vi.hoisted(() => ({
@@ -77,6 +78,12 @@ function makeResolvedEvents(
 
 describe("useInboxData", () => {
   beforeEach(() => {
+    useAuthorizationStore.getState().set({
+      authEnabled: true,
+      username: "admin-user",
+      roles: ["admin"],
+      canMutate: true,
+    });
     mockGetInboxEvents.mockReset();
     mockMarkInboxRead.mockReset();
     mockDeleteInboxEvent.mockReset();
@@ -173,6 +180,66 @@ describe("useInboxData", () => {
     expect(mockMarkInboxRead).toHaveBeenCalledWith({ event_ids: ["m1"] });
     expect(result.current.pushMessages[0].read).toBe(true);
     expect(result.current.summary.pushMessages.unread).toBe(0);
+  });
+
+  it("keeps read operations available but makes every mutation inert for a read-only user", async () => {
+    useAuthorizationStore.getState().set({
+      authEnabled: true,
+      username: "member-user",
+      roles: ["member"],
+      canMutate: false,
+    });
+    mockGetInboxEvents.mockResolvedValue(
+      makeResolvedEvents([makeEvent({ id: "m1", read: false })]),
+    );
+
+    const { result } = renderHook(() => useInboxData());
+
+    await waitFor(() => expect(result.current.pushMessages).toHaveLength(1));
+
+    act(() => result.current.markMessageAsRead("m1"));
+    await act(async () => {
+      expect(await result.current.markAllMessagesAsRead()).toBe(0);
+      expect(await result.current.deleteMessages(["m1"])).toBe(0);
+      result.current.deleteMessage("m1");
+      await result.current.refreshPushMessages();
+    });
+
+    expect(mockGetInboxEvents).toHaveBeenCalledTimes(2);
+    expect(mockMarkInboxRead).not.toHaveBeenCalled();
+    expect(mockDeleteInboxEvent).not.toHaveBeenCalled();
+    expect(result.current.pushMessages[0]).toMatchObject({
+      id: "m1",
+      read: false,
+    });
+  });
+
+  it("re-checks current authorization when an admin handler is invoked after downgrade", async () => {
+    mockGetInboxEvents.mockResolvedValue(
+      makeResolvedEvents([makeEvent({ id: "m1", read: false })]),
+    );
+    const { result } = renderHook(() => useInboxData());
+    await waitFor(() => expect(result.current.pushMessages).toHaveLength(1));
+    const staleMarkOne = result.current.markMessageAsRead;
+    const staleMarkAll = result.current.markAllMessagesAsRead;
+    const staleDeleteMany = result.current.deleteMessages;
+
+    useAuthorizationStore.getState().set({
+      authEnabled: true,
+      username: "member-user",
+      roles: ["member"],
+      canMutate: false,
+    });
+
+    act(() => staleMarkOne("m1"));
+    await act(async () => {
+      expect(await staleMarkAll()).toBe(0);
+      expect(await staleDeleteMany(["m1"])).toBe(0);
+    });
+
+    expect(mockMarkInboxRead).not.toHaveBeenCalled();
+    expect(mockDeleteInboxEvent).not.toHaveBeenCalled();
+    expect(result.current.pushMessages[0].read).toBe(false);
   });
 
   it("markAllMessagesAsRead returns 0 without calling api when no unread", async () => {

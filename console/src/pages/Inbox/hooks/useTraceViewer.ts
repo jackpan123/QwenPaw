@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { message } from "antd";
 import { useTranslation } from "react-i18next";
 import api from "../../../api";
+import { useAuthorizationStore } from "../../../stores/authorizationStore";
 import type { PushMessage } from "../types";
 import {
   buildContentFallbackTrace,
@@ -28,7 +29,7 @@ export interface TraceViewerState {
 }
 
 export function useTraceViewer(
-  markMessageAsRead: (id: string) => void,
+  markMessageAsRead?: (id: string) => void,
 ): TraceViewerState {
   const { t } = useTranslation();
   const [detailOpen, setDetailOpen] = useState(false);
@@ -78,11 +79,16 @@ export function useTraceViewer(
 
   const openMessageDetail = useCallback(
     (messageItem: PushMessage) => {
-      if (!messageItem.read) {
-        markMessageAsRead(messageItem.id);
+      const canMarkAsRead =
+        Boolean(markMessageAsRead) &&
+        useAuthorizationStore.getState().canMutate;
+      if (!messageItem.read && canMarkAsRead) {
+        markMessageAsRead?.(messageItem.id);
       }
       setSelectedMessage(
-        messageItem.read ? messageItem : { ...messageItem, read: true },
+        messageItem.read || !canMarkAsRead
+          ? messageItem
+          : { ...messageItem, read: true },
       );
       setDetailOpen(true);
 

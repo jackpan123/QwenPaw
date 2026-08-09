@@ -22,15 +22,18 @@ import {
 } from "../stores/sessionListStore";
 import { useCodingMode } from "../stores/codingModeStore";
 import { useSidebarModeStore } from "../stores/sidebarModeStore";
+import { useAuthorizationStore } from "../stores/authorizationStore";
 import { buildSessionPath, getSessionIdFromPath } from "../utils/sessionRoute";
 import sessionApi from "../pages/Chat/sessionApi";
 import { useInboxWobble } from "../hooks/useInboxWobble";
 import styles from "./index.module.less";
 import { useTheme } from "../contexts/ThemeContext";
 import { useMenuItems, useRoutes } from "../plugins/registry/hooks";
+import { filterRoutesForAuthorization } from "../plugins/registry/store";
 import { Slot } from "../plugins/registry/Slot";
 import {
   deriveOpenKeys,
+  filterMenuItemsForAuthorization,
   findMenuItem,
   flattenMenu,
   renderIcon,
@@ -104,11 +107,10 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
   // When coding mode is on, the sidebar "Chat" entry should land on /coding
   // (FileTree + Editor + Chat panel) rather than the bare Chat page.
   const { codingMode } = useCodingMode();
+  const canMutate = useAuthorizationStore((state) => state.canMutate);
   const currentSessionId = getSessionIdFromPath(location.pathname);
-  const chatPath = buildSessionPath(
-    codingMode ? "coding" : "chat",
-    currentSessionId,
-  );
+  const chatMode = codingMode && canMutate ? "coding" : "chat";
+  const chatPath = buildSessionPath(chatMode, currentSessionId);
   const [authEnabled, setAuthEnabled] = useState(false);
   // Start collapsed on mobile so the first paint does not overlay/obscure
   // the main content on narrow viewports.
@@ -129,31 +131,54 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
   const rawAgentMenu = useMenuItems("primary.agentScoped");
   const rawSettingsMenu = useMenuItems("primary.settings");
   const routes = useRoutes();
+  const authorizedRoutes = useMemo(
+    () => filterRoutesForAuthorization(routes, canMutate),
+    [routes, canMutate],
+  );
+
+  const authorizedAgentMenu = useMemo(
+    () =>
+      filterMenuItemsForAuthorization(
+        rawAgentMenu,
+        authorizedRoutes,
+        canMutate,
+      ),
+    [rawAgentMenu, authorizedRoutes, canMutate],
+  );
+  const authorizedSettingsMenu = useMemo(
+    () =>
+      filterMenuItemsForAuthorization(
+        rawSettingsMenu,
+        authorizedRoutes,
+        canMutate,
+      ),
+    [rawSettingsMenu, authorizedRoutes, canMutate],
+  );
 
   // Apply simple-mode filtering when enabled
   const agentMenu = useMemo(
     () =>
       sidebarMode === "simple"
-        ? flattenMenuForSimpleMode(rawAgentMenu)
-        : rawAgentMenu,
-    [rawAgentMenu, sidebarMode],
+        ? flattenMenuForSimpleMode(authorizedAgentMenu)
+        : authorizedAgentMenu,
+    [authorizedAgentMenu, sidebarMode],
   );
   const settingsMenu = useMemo(
     () =>
       sidebarMode === "simple"
-        ? flattenMenuForSimpleMode(rawSettingsMenu)
-        : rawSettingsMenu,
-    [rawSettingsMenu, sidebarMode],
+        ? flattenMenuForSimpleMode(authorizedSettingsMenu)
+        : authorizedSettingsMenu,
+    [authorizedSettingsMenu, sidebarMode],
   );
 
   // Flat nav entries for simple mode (icon + label + path)
   const simpleFlatNav = useMemo(() => {
     if (sidebarMode !== "simple") return [];
     return [
-      ...flattenMenu(agentMenu, routes, 16),
-      ...flattenMenu(settingsMenu, routes, 16),
+      ...flattenMenu(agentMenu, authorizedRoutes, 16),
+      ...flattenMenu(settingsMenu, authorizedRoutes, 16),
     ];
-  }, [agentMenu, settingsMenu, routes, sidebarMode]);
+  }, [agentMenu, settingsMenu, authorizedRoutes, sidebarMode]);
 
   // ── Effects ──────────────────────────────────────────────────────────────
 
@@ -348,8 +373,8 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
     );
     const flat = [
       stickyChat,
-      ...flattenMenu(agentMenu, routes, 18),
-      ...flattenMenu(settingsMenu, routes, 18),
+      ...flattenMenu(agentMenu, authorizedRoutes, 18),
+      ...flattenMenu(settingsMenu, authorizedRoutes, 18),
     ];
     return flat.map((entry) =>
       entry.key === "core.inbox"
@@ -359,7 +384,7 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
   }, [
     agentMenu,
     settingsMenu,
-    routes,
+    authorizedRoutes,
     chatPath,
     t,
     hasInboxUnread,
@@ -374,7 +399,7 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
       window.open(item.href, "_blank", "noopener,noreferrer");
       return;
     }
-    const path = routeIdToPath(item?.route, routes);
+    const path = routeIdToPath(item?.route, authorizedRoutes);
     if (path) navigate(path);
   };
 
@@ -392,10 +417,9 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
       window.dispatchEvent(new CustomEvent("qwenpaw:sidebar-new-chat"));
     } else {
       sessionStorage.setItem("qwenpaw_pending_new_chat", "1");
-      const mode = codingMode ? "coding" : "chat";
-      navigate(`/${mode}`);
+      navigate(`/${chatMode}`);
     }
-  }, [location.pathname, navigate, codingMode]);
+  }, [location.pathname, navigate, chatMode]);
 
   /**
    * Session click: navigate directly without relying on ChatSessionInitializer.
@@ -404,12 +428,11 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
    */
   const handleSidebarSessionClick = useCallback(
     (sessionId: string) => {
-      const mode = codingMode ? "coding" : "chat";
       const effectiveId = sessionApi.getEffectiveSessionId(sessionId);
-      const targetPath = buildSessionPath(mode, effectiveId);
+      const targetPath = buildSessionPath(chatMode, effectiveId);
       navigate(targetPath);
     },
-    [codingMode, navigate],
+    [chatMode, navigate],
   );
 
   // ── Render ────────────────────────────────────────────────────────────────

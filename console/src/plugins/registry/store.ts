@@ -19,6 +19,7 @@ import type {
   MenuItem,
   MenuLocation,
   Route,
+  ResolvedRoute,
   RouteWrapper,
   SlotInfo,
   SlotKind,
@@ -331,14 +332,6 @@ interface RouteWrapEntry {
   registrationId: string;
 }
 
-interface ResolvedRoute {
-  id: string;
-  path: string;
-  source: string;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  Component: React.ComponentType<any>;
-}
-
 class RouteRegistryImpl {
   private bases = new Map<string, RouteEntry>();
   private overrides = new Map<string, RouteOverrideEntry[]>(); // stack
@@ -556,6 +549,7 @@ class RouteRegistryImpl {
         id: entry.route.id,
         path: entry.route.path,
         source: overrideTop?.source ?? entry.source,
+        capability: entry.route.capability,
         Component,
       });
     }
@@ -564,6 +558,15 @@ class RouteRegistryImpl {
 }
 
 export const routeRegistry = new RouteRegistryImpl();
+
+/** Read-only users may access only routes explicitly declared readable. */
+export function filterRoutesForAuthorization<
+  T extends Pick<ResolvedRoute, "capability">,
+>(routes: readonly T[], canMutate: boolean): T[] {
+  return canMutate
+    ? [...routes]
+    : routes.filter((route) => route.capability === "read");
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SlotRegistry
