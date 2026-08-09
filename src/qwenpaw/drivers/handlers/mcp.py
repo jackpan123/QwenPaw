@@ -368,7 +368,9 @@ def _mcp_tool_to_capability(
     # explicitly classifies it.  ``annotations`` may live on either the
     # wrapped raw tool or the AgentScope wrapper.
     annotations = getattr(raw_tool, "annotations", None) or getattr(
-        tool, "annotations", None
+        tool,
+        "annotations",
+        None,
     )
     read_only = getattr(annotations, "readOnlyHint", None) is True
     effect = ActionEffect.READ if read_only else ActionEffect.UNKNOWN

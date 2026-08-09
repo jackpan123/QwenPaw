@@ -12,7 +12,6 @@ from __future__ import annotations
 import asyncio
 import json
 from types import SimpleNamespace
-from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
@@ -208,9 +207,7 @@ async def test_member_denial_uses_configured_message(monkeypatch):
     )
 
     assert result.action is HookAction.SHORT_CIRCUIT
-    assert result.payload.get_text_content() == (
-        "自定义：仅管理员可以执行该变更。"
-    )
+    assert result.payload.get_text_content() == ("自定义：仅管理员可以执行该变更。")
 
 
 async def test_read_only_continues():
@@ -237,9 +234,7 @@ async def test_ambiguous_continues_with_read_only_injection():
     result = await MutationIntentHook(classifier=classifier).run(ctx)
 
     assert result.action is HookAction.CONTINUE
-    assert any(
-        "不得执行变更" in item["content"] for item in ctx.context_injections
-    )
+    assert any("不得执行变更" in item["content"] for item in ctx.context_injections)
 
 
 async def test_recent_session_context_is_bounded_and_passed_to_classifier():
@@ -308,9 +303,7 @@ async def test_overlong_member_message_degrades_without_classifier(
     assert len(text) > MAX_CURRENT_MESSAGE_CHARS
     assert result.action is HookAction.CONTINUE
     classifier.assert_not_called()
-    assert any(
-        "不得执行变更" in item["content"] for item in ctx.context_injections
-    )
+    assert any("不得执行变更" in item["content"] for item in ctx.context_injections)
     records = [
         record.getMessage()
         for record in caplog.records
@@ -332,9 +325,7 @@ async def test_classifier_timeout_injects_read_only_constraint():
     result = await MutationIntentHook(classifier=timeout).run(ctx)
 
     assert result.action is HookAction.CONTINUE
-    assert any(
-        "不得执行变更" in item["content"] for item in ctx.context_injections
-    )
+    assert any("不得执行变更" in item["content"] for item in ctx.context_injections)
 
 
 async def test_configured_wait_for_timeout_cancels_classifier(monkeypatch):
@@ -369,29 +360,25 @@ async def test_configured_wait_for_timeout_cancels_classifier(monkeypatch):
 
 
 async def test_classifier_model_error_injects_read_only_constraint():
-    async def boom(*a, **k):  # noqa: ARG001
+    async def boom(*_args, **_kwargs):
         raise RuntimeError("model exploded")
 
     ctx = _member_ctx("改一下名字")
     result = await MutationIntentHook(classifier=boom).run(ctx)
 
     assert result.action is HookAction.CONTINUE
-    assert any(
-        "不得执行变更" in item["content"] for item in ctx.context_injections
-    )
+    assert any("不得执行变更" in item["content"] for item in ctx.context_injections)
 
 
 async def test_classifier_invalid_json_degrades_to_continue():
-    async def bad_json(*a, **k):  # noqa: ARG001
+    async def bad_json(*_args, **_kwargs):
         return "not json"
 
     ctx = _member_ctx("随便")
     result = await MutationIntentHook(classifier=bad_json).run(ctx)
 
     assert result.action is HookAction.CONTINUE
-    assert any(
-        "不得执行变更" in item["content"] for item in ctx.context_injections
-    )
+    assert any("不得执行变更" in item["content"] for item in ctx.context_injections)
 
 
 async def test_classifier_failure_audit_excludes_exception_and_prompt(caplog):

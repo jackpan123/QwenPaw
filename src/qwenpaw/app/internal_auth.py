@@ -158,6 +158,7 @@ def mint_internal_principal(
     return f"{encoded}.{_b64encode(signature)}"
 
 
+# pylint: disable-next=too-many-return-statements,too-many-branches
 def verify_internal_principal(
     credential: str,
     *,

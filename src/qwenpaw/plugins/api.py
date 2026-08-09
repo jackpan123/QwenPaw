@@ -173,6 +173,7 @@ def _bridge_to_runtime(
         # register_tool(side_effect=...) is authoritative over decorator
         # metadata and any descriptor retained across plugin hot reloads.
         # All unrelated declarative fields are preserved by replace().
+        # pylint: disable-next=protected-access
         tool_func._tool_descriptor = desc  # type: ignore[attr-defined]
     elif desc is None:
         is_async = inspect.iscoroutinefunction(tool_func)

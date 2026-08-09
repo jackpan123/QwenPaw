@@ -286,5 +286,6 @@ def make_lsp_tool(  # noqa: C901  pylint: disable=too-many-statements
         effect=ToolEffectSpec(default=ActionEffect.READ),
     )
     # Dynamic per-workspace tool: attach metadata without global collection.
+    # pylint: disable-next=protected-access
     lsp._tool_descriptor = descriptor  # type: ignore[attr-defined]
     return lsp

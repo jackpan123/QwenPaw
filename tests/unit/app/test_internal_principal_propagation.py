@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """AuthMiddleware + inter-agent header behavior for the internal credential."""
 
+# pylint: disable=protected-access
+
 from __future__ import annotations
 
 from unittest.mock import patch

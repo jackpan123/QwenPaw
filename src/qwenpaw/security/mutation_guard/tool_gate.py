@@ -109,7 +109,7 @@ def mutation_denied_tool_chunk(decision: MutationDecision) -> Any:
         is_last=True,
         state=ToolResultState.DENIED,
         content=[
-            TextBlock(type="text", text=mutation_denial_message(decision))
+            TextBlock(type="text", text=mutation_denial_message(decision)),
         ],
         metadata={"mutation_guard_denied": True},
     )
@@ -118,8 +118,11 @@ def mutation_denied_tool_chunk(decision: MutationDecision) -> Any:
 async def _call_function_tool_with_cleanup(
     tool: Any,
     input_data: dict[str, Any],
-) -> Any:
+) -> Any:  # pylint: disable=protected-access
     """Match FunctionTool.call while propagating stream cancellation."""
+    # Accessing FunctionTool internals is deliberate: AgentScope's public
+    # ``call`` wrapper cannot propagate ``aclose`` to nested generators.
+    # pylint: disable=protected-access
     from agentscope.tool import ToolChunk
 
     func = tool._func

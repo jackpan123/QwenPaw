@@ -142,7 +142,7 @@ def test_full_config_restore_serializes_real_transaction_without_lost_fields(
 
     assert not restore_thread.is_alive()
     assert not mutation_thread.is_alive()
-    assert failures == []
+    assert not failures
     assert mutation_completed_during_restore is False
     persisted = json.loads(config_path.read_text(encoding="utf-8"))
     assert persisted["user_timezone"] == "Europe/London"
@@ -221,7 +221,7 @@ def test_workspace_only_restore_uses_root_config_transaction_lock(
     restore_thread.join(timeout=3)
     mutation_thread.join(timeout=3)
 
-    assert failures == []
+    assert not failures
     assert mutation_completed_during_restore is False
     persisted = json.loads(config_path.read_text(encoding="utf-8"))
     assert (
@@ -298,7 +298,7 @@ def test_independent_directory_staging_does_not_hold_root_config_lock(
     assert mutation_thread is not None
     mutation_thread.join(timeout=3)
 
-    assert failures == []
+    assert not failures
     assert completed_during_secret_stage == [True]
 
 
@@ -518,5 +518,5 @@ def test_workspace_config_write_failure_does_not_pollute_shared_cache(
     assert config_utils.load_config(config_path) is cached
     persisted = json.loads(config_path.read_text(encoding="utf-8"))
     assert persisted["agents"]["profiles"]["agent-a"]["workspace_dir"] == str(
-        old_workspace
+        old_workspace,
     )

@@ -2301,10 +2301,7 @@ class MutationGuardConfig(BaseModel):
     )
     intent_precheck_enabled: bool = True
     classifier_timeout_seconds: int = Field(default=8, ge=1, le=60)
-    deny_message: str = (
-        "当前账号没有执行变更操作的权限。"
-        "你仍然可以询问相关操作方法或获取示例。"
-    )
+    deny_message: str = "当前账号没有执行变更操作的权限。" "你仍然可以询问相关操作方法或获取示例。"
 
     @field_validator("privileged_roles")
     @classmethod

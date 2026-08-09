@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """Effect metadata must survive every dynamic wrapper construction path."""
 
+# pylint: disable=protected-access
+
 from __future__ import annotations
 
 from types import SimpleNamespace

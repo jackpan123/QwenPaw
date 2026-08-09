@@ -187,7 +187,7 @@ def test_context_roles_string_is_not_split_into_characters():
         },
     )
 
-    assert principal.roles == ()
+    assert not principal.roles
     assert principal.guarded is True
     assert principal.can_mutate is False
 

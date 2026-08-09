@@ -54,11 +54,11 @@ _current_approval_route: ContextVar[Optional[dict]] = ContextVar(
 # from ``channel_meta["acl_principal"]`` (server-derived); never from the
 # client request body. Used by inter-agent HTTP calls to mint a signed,
 # target-bound credential instead of forwarding the NocoBase token.
-_current_request_principal: ContextVar["Optional[RequestPrincipal]"] = (
-    ContextVar(
-        "current_request_principal",
-        default=None,
-    )
+_current_request_principal: ContextVar[
+    "Optional[RequestPrincipal]"
+] = ContextVar(
+    "current_request_principal",
+    default=None,
 )
 
 

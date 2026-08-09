@@ -505,7 +505,7 @@ def test_dynamic_cron_routes_require_authentication(monkeypatch):
     finally:
         auth_mod.unregister_external_identity_resolver(resolver)
 
-    assert calls == []
+    assert not calls
 
 
 @pytest.mark.p0
@@ -537,7 +537,7 @@ def test_member_cannot_mutate_dynamic_cron_routes(
 
     assert response.status_code == 403
     assert response.json()["code"] == "mutation_permission_denied"
-    assert calls == []
+    assert not calls
 
 
 @pytest.mark.p0

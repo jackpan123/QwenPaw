@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# pylint: disable=protected-access
+# pylint: disable=protected-access,redefined-outer-name
 """Tests for agent discovery and inter-agent chat helpers."""
 
 from __future__ import annotations

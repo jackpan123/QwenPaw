@@ -14,7 +14,7 @@ to the rest of governance.
 
 from __future__ import annotations
 
-# pylint: disable=protected-access
+# pylint: disable=not-callable,protected-access,unused-argument
 
 import asyncio
 import json
@@ -32,9 +32,6 @@ from qwenpaw.runtime.tool_guard import GuardedFunctionTool
 from qwenpaw.runtime.tool_registry import ToolEffectSpec
 from qwenpaw.security.mutation_guard import (
     ActionEffect,
-    MutationDecision,
-    RequestPrincipal,
-    authorize_effect,
 )
 from qwenpaw.security.mutation_guard import tool_gate
 
@@ -1396,7 +1393,9 @@ async def test_sandbox_retry_reauthorizes_before_second_execution(monkeypatch):
         )
 
     monkeypatch.setattr(
-        tool_adapter, "_ask_user_approval", approve_then_remove_privilege
+        tool_adapter,
+        "_ask_user_approval",
+        approve_then_remove_privilege,
     )
 
     permission = await tool.check_permissions({})

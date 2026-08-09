@@ -783,7 +783,7 @@ def _apply_workspace_paths_and_save(
             profiles = agents.setdefault("profiles", {})
             if not isinstance(profiles, dict):
                 raise ValueError(
-                    "Root config agent profiles must be an object"
+                    "Root config agent profiles must be an object",
                 )
             for aid in new_aids:
                 if aid not in profiles:

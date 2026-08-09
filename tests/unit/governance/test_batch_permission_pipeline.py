@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """Nested batch calls must use the same pre-execution permission pipeline."""
 
+# pylint: disable=protected-access
+
 from __future__ import annotations
 
 import importlib

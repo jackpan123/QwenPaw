@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 # pylint: disable=protected-access,import-outside-toplevel
+# pylint: disable=redefined-outer-name,not-callable
 """Unit tests for plugin ``register_tool`` side-effect governance (Task 7).
 
 ``PluginApi.register_tool`` accepts a ``side_effect`` argument that flows

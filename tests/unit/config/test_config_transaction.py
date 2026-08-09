@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """Tests for transactional root configuration updates."""
 
+# pylint: disable=protected-access
+
 from __future__ import annotations
 
 import json
@@ -19,7 +21,10 @@ def _reset_root_config_cache(monkeypatch):
     monkeypatch.setattr(config_utils, "_config_cache", None)
     monkeypatch.setattr(config_utils, "_config_mtime", None)
     monkeypatch.setattr(
-        config_utils, "_config_cache_path", None, raising=False
+        config_utils,
+        "_config_cache_path",
+        None,
+        raising=False,
     )
 
 
@@ -117,7 +122,7 @@ def test_transaction_serializes_concurrent_updates_without_lost_fields(
 
     assert not first.is_alive()
     assert not second.is_alive()
-    assert failures == []
+    assert not failures
     persisted = json.loads(config_path.read_text(encoding="utf-8"))
     assert persisted["user_timezone"] == "Asia/Shanghai"
     assert (
@@ -315,7 +320,7 @@ def test_mutation_transaction_and_real_tool_guard_update_keep_both_fields(
     transaction_thread.join(timeout=3)
     tool_guard_thread.join(timeout=3)
 
-    assert failures == []
+    assert not failures
     persisted = json.loads(config_path.read_text(encoding="utf-8"))
     assert (
         persisted["security"]["mutation_guard"]["deny_message"]

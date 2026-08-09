@@ -139,6 +139,7 @@ class MutationIntentHook(LifecycleHook):
     def __init__(self, classifier: Classifier | None = None) -> None:
         self._classifier = classifier or classify_mutation_intent
 
+    # pylint: disable-next=too-many-return-statements
     async def run(self, ctx: HookContext) -> HookResult:
         config = load_config().security.mutation_guard
         if not config.enabled or not config.intent_precheck_enabled:
@@ -175,7 +176,7 @@ class MutationIntentHook(LifecycleHook):
                 principal,
                 reason="classifier_timeout",
             )
-        except asyncio.CancelledError:
+        except asyncio.CancelledError:  # pylint: disable=try-except-raise
             raise
         except Exception:
             return self._degrade(

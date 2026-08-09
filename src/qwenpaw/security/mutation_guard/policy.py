@@ -119,10 +119,10 @@ def build_request_principal(
         config.enabled
         and auth_enabled
         and user_id
-        and source.strip().casefold() == "nocobase"
+        and source.strip().casefold() == "nocobase",
     )
     privileged = bool(
-        _normalized(materialized_roles) & _normalized(config.privileged_roles)
+        _normalized(materialized_roles) & _normalized(config.privileged_roles),
     )
     return RequestPrincipal(
         user_id=user_id,

@@ -82,6 +82,7 @@ def _normalize_api_base_url(base_url: Optional[str]) -> str:
     return base
 
 
+# pylint: disable-next=too-many-return-statements
 def _is_local_agent_api_target(base_url: Optional[str]) -> bool:
     """Return True when *base_url* targets the in-process agent API.
 

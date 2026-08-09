@@ -157,7 +157,7 @@ async def test_readonly_driver_capability_allowed_for_member() -> None:
 async def test_chat_infrastructure_driver_capability_allowed_for_member() -> (
     None
 ):
-    invoke, state = _invoker_tracker()
+    invoke, _ = _invoker_tracker()
     tool = DriverCapabilityTool(
         _capability(ActionEffect.CHAT_INFRASTRUCTURE),
         invoke,
@@ -172,7 +172,7 @@ async def test_chat_infrastructure_driver_capability_allowed_for_member() -> (
 async def test_admin_not_denied_for_unknown_capability() -> None:
     # An admin (can_mutate=True) must fall through to the original
     # "Driver capability policy is handled by Driver" ALLOW.
-    invoke, state = _invoker_tracker()
+    invoke, _ = _invoker_tracker()
     tool = DriverCapabilityTool(
         _capability(ActionEffect.UNKNOWN),
         invoke,

@@ -6,6 +6,8 @@ left accidentally fail-closed and no tool is silently privileged. Each tool
 is also asserted to map to its expected category per the fixed catalog.
 """
 
+# pylint: disable=protected-access
+
 from __future__ import annotations
 
 # Importing the tools package triggers every @tool_descriptor at import

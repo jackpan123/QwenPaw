@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """Runtime orchestration coverage for the mutation intent hook."""
 
+# pylint: disable=using-constant-test
+
 from __future__ import annotations
 
 from types import SimpleNamespace

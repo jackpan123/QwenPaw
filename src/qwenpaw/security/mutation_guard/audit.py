@@ -49,7 +49,7 @@ _SENSITIVE_ASSIGNMENT_PATTERN = re.compile(
     r"password|passwd|credential)[\"']?\s*[:=]\s*",
 )
 _AUTH_CREDENTIAL_PATTERN = re.compile(
-    r"(?i)\b(?:Bearer|Basic)\s+" r"(?:[\"'][^\"'\r\n]+[\"']|[^\s,;]+)",
+    r"(?i)\b(?:Bearer|Basic)\s+(?:[\"'][^\"'\r\n]+[\"']|[^\s,;]+)",
 )
 
 

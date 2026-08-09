@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """acl_roles injection into the console native payload."""
 
+# pylint: disable=protected-access,using-constant-test
+
 from __future__ import annotations
 
 import asyncio
@@ -138,7 +140,9 @@ async def test_background_endpoint_injects_server_principal(monkeypatch):
         return original_extract(*args, **kwargs)
 
     monkeypatch.setattr(
-        console_router, "get_agent_for_request", fake_get_agent
+        console_router,
+        "get_agent_for_request",
+        fake_get_agent,
     )
     monkeypatch.setattr(
         console_router,
