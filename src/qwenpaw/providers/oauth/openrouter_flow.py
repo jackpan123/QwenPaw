@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 import httpx
 
@@ -23,9 +23,13 @@ class OpenRouterOAuthFlow(OAuthFlow):
     def start(self, callback_url: str) -> OAuthStartResult:
         """Generate OpenRouter authorize URL."""
         state = generate_state()
+        separator = "&" if "?" in callback_url else "?"
+        delegated_callback_url = (
+            f"{callback_url}{separator}{urlencode({'state': state})}"
+        )
         authorize_url = (
             f"https://openrouter.ai/auth"
-            f"?callback_url={quote(callback_url, safe='')}"
+            f"?callback_url={quote(delegated_callback_url, safe='')}"
         )
         return OAuthStartResult(
             authorize_url=authorize_url,

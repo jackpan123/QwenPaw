@@ -1,9 +1,18 @@
 # -*- coding: utf-8 -*-
 """Integration tests for the MCP OAuth 2.1 router."""
+# pylint: disable=protected-access
 from __future__ import annotations
+
+from types import SimpleNamespace
 
 import pytest
 from helpers import default_http_timeout
+
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from qwenpaw.app.routers import mcp_oauth
+from qwenpaw.security.mutation_guard import RouteCapability
 
 _MCP_OAUTH_HTTP_TIMEOUT = default_http_timeout(15.0)
 
@@ -92,3 +101,71 @@ def test_mcp_oauth_callback_with_error_param_returns_html_400(
     content_type = resp.headers.get("content-type", "")
     assert "html" in content_type.lower(), content_type
     assert "Test denied by user" in resp.text
+
+
+def test_mcp_oauth_routes_have_explicit_security_capabilities() -> None:
+    assert (
+        mcp_oauth.oauth_start.__qwenpaw_api_capability__
+        is RouteCapability.MUTATE
+    )
+    assert (
+        mcp_oauth.oauth_callback.__qwenpaw_api_capability__
+        is RouteCapability.PUBLIC
+    )
+    assert (
+        mcp_oauth.oauth_status.__qwenpaw_api_capability__
+        is RouteCapability.READ
+    )
+    assert (
+        mcp_oauth.oauth_revoke.__qwenpaw_api_capability__
+        is RouteCapability.MUTATE
+    )
+
+
+def test_mcp_callback_state_is_one_time_and_required_before_persisting(
+    monkeypatch,
+) -> None:
+    persisted = []
+
+    async def exchange(_session, code):
+        return {"access_token": f"token-for-{code}"}
+
+    async def persist(_request, session, tokens):
+        persisted.append((session.client_key, tokens["access_token"]))
+
+    monkeypatch.setattr(mcp_oauth, "_exchange_code_for_tokens", exchange)
+    monkeypatch.setattr(mcp_oauth, "_persist_tokens", persist)
+    mcp_oauth._state_store.clear()
+    session = mcp_oauth.OAuthSession(
+        agent_id="agent-1",
+        client_key="client-1",
+        code_verifier="verifier",
+        client_id="client-id",
+        auth_endpoint="https://auth.example/authorize",
+        token_endpoint="https://auth.example/token",
+        redirect_uri="http://testserver/api/mcp/oauth/callback",
+        scope="",
+    )
+    mcp_oauth._state_store["delegated-state"] = session
+    app = FastAPI()
+    app.state.multi_agent_manager = SimpleNamespace()
+    app.include_router(mcp_oauth.router, prefix="/api")
+    client = TestClient(app)
+
+    missing = client.get(
+        "/api/mcp/oauth/callback",
+        params={"code": "attacker-code"},
+    )
+    valid = client.get(
+        "/api/mcp/oauth/callback",
+        params={"code": "valid-code", "state": "delegated-state"},
+    )
+    replay = client.get(
+        "/api/mcp/oauth/callback",
+        params={"code": "replay-code", "state": "delegated-state"},
+    )
+
+    assert missing.status_code == 400
+    assert valid.status_code == 200
+    assert replay.status_code == 400
+    assert persisted == [("client-1", "token-for-valid-code")]

@@ -36,7 +36,8 @@ from ...utils.logging import LOG_FILE_PATH, sanitize_log_value
 from ..agent_context import get_agent_for_request
 from ..approvals.display import approval_display_fields
 from ..chats.title_generator import generate_and_update_title
-from ..mutation_authorization import api_capability
+from ..mutation_authorization import api_capability, guarded_mutation_denial
+from ..task_tracker import RunOwnershipError
 from ..utils import check_upload_size
 
 logger = logging.getLogger(__name__)
@@ -56,6 +57,7 @@ class _BackgroundTask:
     finished_at: Optional[float] = None
     result: Optional[Dict[str, Any]] = None
     asyncio_task: Optional[asyncio.Task] = None
+    owner_id: str = ""
 
 
 _bg_tasks: Dict[str, _BackgroundTask] = {}
@@ -110,6 +112,18 @@ def _read_request_field(request_data: Union[AgentRequest, dict], name: str):
     if isinstance(request_data, AgentRequest):
         return getattr(request_data, name, None)
     return request_data.get(name)
+
+
+def _guarded_requester_id(request: Request) -> str | None:
+    """Return the owner id enforced for a guarded read-only member."""
+    principal = getattr(request.state, "request_principal", None)
+    if (
+        isinstance(principal, RequestPrincipal)
+        and principal.guarded
+        and not principal.can_mutate
+    ):
+        return principal.user_id
+    return None
 
 
 # Reserved request_context keys that the client must NEVER supply. Only
@@ -284,32 +298,49 @@ async def post_console_chat(
         name=name,
     )
     tracker = workspace.task_tracker
-
-    # Kick off an LLM-backed title generation in the background when the chat
-    # was just created with the truncated placeholder. This runs detached so
-    # the streaming response is never blocked by title generation latency.
-    if first_text and chat.name == name:
-        asyncio.create_task(
-            generate_and_update_title(
-                workspace=workspace,
-                chat_id=chat.id,
-                user_message=first_text,
-                placeholder_name=name,
-            ),
-        )
+    requester_id = _guarded_requester_id(request)
 
     is_reconnect = _read_request_field(request_data, "reconnect") is True
 
     if is_reconnect:
-        queue = await tracker.attach(chat.id)
+        try:
+            queue = await tracker.attach(
+                chat.id,
+                requester_id=requester_id,
+            )
+        except RunOwnershipError as exc:
+            raise HTTPException(
+                status_code=403,
+                detail="Run access denied",
+            ) from exc
         if queue is None:
             return
     else:
-        queue, _ = await tracker.attach_or_start(
-            chat.id,
-            native_payload,
-            console_channel.stream_one,
-        )
+        try:
+            queue, is_new_run = await tracker.attach_or_start(
+                chat.id,
+                native_payload,
+                console_channel.stream_one,
+                owner_id=acl_sender_id,
+                requester_id=requester_id,
+            )
+        except RunOwnershipError as exc:
+            raise HTTPException(
+                status_code=403,
+                detail="Run access denied",
+            ) from exc
+
+        # Only the caller that successfully starts this run may schedule the
+        # detached title write. Existing-run joins and reconnects never do.
+        if is_new_run and first_text and chat.name == name:
+            asyncio.create_task(
+                generate_and_update_title(
+                    workspace=workspace,
+                    chat_id=chat.id,
+                    user_message=first_text,
+                    placeholder_name=name,
+                ),
+            )
 
     async def event_generator() -> AsyncGenerator[str, None]:
         # Hold iterator so finally can aclose(); guarantees stream_from_queue's
@@ -349,11 +380,16 @@ async def post_console_chat_stop(
     logger.debug("[STOP API] Received stop request for chat_id=%s", chat_id)
     workspace = await get_agent_for_request(request)
 
+    requester_id = _guarded_requester_id(request)
+
     # Try to stop with the provided chat_id first
     logger.debug(
         "[STOP API] Got workspace, calling task_tracker.request_stop...",
     )
-    stopped = await workspace.task_tracker.request_stop(chat_id)
+    stopped = await workspace.task_tracker.request_stop(
+        chat_id,
+        requester_id=requester_id,
+    )
 
     # If not found, the chat_id might be a session_id (timestamp)
     # Try to resolve it to the actual chat UUID
@@ -367,6 +403,7 @@ async def post_console_chat_stop(
             resolved_chat_id = await chat_manager.get_chat_id_by_session(
                 session_id=chat_id,
                 channel="console",
+                user_id=requester_id,
             )
             if resolved_chat_id:
                 logger.debug(
@@ -376,6 +413,7 @@ async def post_console_chat_stop(
                 )
                 stopped = await workspace.task_tracker.request_stop(
                     resolved_chat_id,
+                    requester_id=requester_id,
                 )
 
     logger.debug(
@@ -530,7 +568,7 @@ async def get_inbox_events(
 
 
 @router.post("/inbox/read")
-@api_capability(RouteCapability.CHAT)
+@api_capability(RouteCapability.MUTATE)
 async def post_mark_inbox_read(payload: MarkInboxReadRequest):
     from ..inbox_store import mark_all_read, mark_read
 
@@ -595,12 +633,30 @@ def _parse_sse_payload(line: str) -> Optional[Dict[str, Any]]:
 async def post_console_chat_task(  # pylint: disable=too-many-statements
     request_data: Union[AgentRequest, dict],
     request: Request,
-) -> dict:
+) -> Any:
     """Run an agent chat as a background task.
 
     Returns a ``task_id`` immediately. Poll status via
     ``GET /console/chat/task/{task_id}``.
     """
+    request_context = _read_request_field(request_data, "request_context")
+    fork_context_requested = isinstance(request_context, dict) and any(
+        request_context.get(key) not in (None, "", False)
+        for key in (
+            "fork_project_dir",
+            "fork_worktree_branch",
+            "fork_scope_id",
+        )
+    )
+    if fork_context_requested:
+        denial = guarded_mutation_denial(
+            request,
+            route="POST /api/console/chat/task",
+            reason="fork_context_requires_privileged_role",
+        )
+        if denial is not None:
+            return denial
+
     workspace = await get_agent_for_request(request)
     console_channel = await workspace.channel_manager.get_channel("console")
     if console_channel is None:
@@ -661,6 +717,7 @@ async def post_console_chat_task(  # pylint: disable=too-many-statements
     bg = _BackgroundTask(
         status="running",
         started_at=time.time(),
+        owner_id=acl_sender_id,
     )
 
     async def _run() -> None:
@@ -782,11 +839,18 @@ async def post_console_chat_task(  # pylint: disable=too-many-statements
     status_code=200,
     summary="Check background chat task status",
 )
-async def get_console_chat_task(task_id: str) -> dict:
+@api_capability(RouteCapability.READ)
+async def get_console_chat_task(task_id: str, request: Request) -> dict:
     """Return the current status of a background chat task."""
     async with _bg_lock:
         bg = _bg_tasks.get(task_id)
     if bg is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Task not found: {task_id}",
+        )
+    requester_id = _guarded_requester_id(request)
+    if requester_id is not None and bg.owner_id != requester_id:
         raise HTTPException(
             status_code=404,
             detail=f"Task not found: {task_id}",

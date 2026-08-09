@@ -16,6 +16,7 @@ from qwenpaw.app.mutation_authorization import (
     MutationAuthorizationMiddleware,
     api_capability,
     default_capability_for_method,
+    guarded_mutation_denial,
 )
 from qwenpaw.config.config import MutationGuardConfig
 from qwenpaw.security.mutation_guard import (
@@ -161,6 +162,30 @@ def _build_default_loader_client(
             return await call_next(request)
 
     return TestClient(app)
+
+
+def test_dynamic_mutation_denial_respects_disabled_guard(monkeypatch):
+    app = FastAPI()
+
+    @app.get("/probe")
+    async def probe(request: Request):
+        request.state.request_principal = MEMBER
+        denial = guarded_mutation_denial(
+            request,
+            route="POST /mixed",
+            reason="test",
+        )
+        return {"denied": denial is not None}
+
+    monkeypatch.setattr(
+        authorization_mod,
+        "_load_config",
+        lambda: MutationGuardConfig(enabled=False),
+    )
+
+    response = TestClient(app).get("/probe")
+
+    assert response.json() == {"denied": False}
 
 
 def _build_dynamic_cron_client(monkeypatch):

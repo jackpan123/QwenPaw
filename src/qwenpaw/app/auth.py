@@ -65,6 +65,18 @@ _PUBLIC_PREFIXES: tuple[str, ...] = (
 # public SPA navigation.
 _PROTECTED_NON_API_PREFIXES: tuple[str, ...] = ("/cron", "/crons")
 
+_OAUTH_CALLBACK_PATH = re.compile(
+    r"^/api/providers/[^/]+/oauth/callback$",
+)
+
+
+def _is_public_oauth_callback(method: str, path: str) -> bool:
+    """Return whether an unauthenticated IdP redirect may enter."""
+    return method == "GET" and (
+        path == "/api/mcp/oauth/callback"
+        or _OAUTH_CALLBACK_PATH.fullmatch(path) is not None
+    )
+
 
 # ---------------------------------------------------------------------------
 # External identity resolvers (e.g. NocoBase SSO plugin)
@@ -492,6 +504,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if (
             request.method == "OPTIONS"
             or (route_method, path) in _PUBLIC_ROUTES
+            or _is_public_oauth_callback(route_method, path)
             or (
                 request.method in {"GET", "HEAD"}
                 and any(path.startswith(p) for p in _PUBLIC_PREFIXES)

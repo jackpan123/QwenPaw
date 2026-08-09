@@ -526,11 +526,21 @@ def nocobase_console_client(monkeypatch):
     }
 
     async def resolver(request):
-        if request.headers.get("Authorization") != "Bearer member-token":
+        identities = {
+            "Bearer member-token": ("member@example.com", ["member"]),
+            "Bearer other-member-token": (
+                "other@example.com",
+                ["member"],
+            ),
+            "Bearer admin-token": ("admin@example.com", ["admin"]),
+            "Bearer root-token": ("root@example.com", ["root"]),
+        }
+        identity = identities.get(request.headers.get("Authorization"))
+        if identity is None:
             return None
         return auth_mod.ResolvedIdentity(
-            sender_id="member@example.com",
-            roles=["member"],
+            sender_id=identity[0],
+            roles=identity[1],
             source="nocobase",
         )
 
@@ -557,8 +567,9 @@ def nocobase_console_client(monkeypatch):
 
     class TaskTracker:
         @staticmethod
-        async def attach(chat_id):
+        async def attach(chat_id, *, requester_id=None):
             captured["attach_calls"].append(chat_id)
+            captured["attach_requester"] = requester_id
             return object()
 
         @staticmethod
@@ -566,8 +577,17 @@ def nocobase_console_client(monkeypatch):
             yield 'data: {"type":"response","status":"completed"}\n\n'
 
         @staticmethod
-        async def attach_or_start(chat_id, payload, producer):
-            captured["start_calls"].append((chat_id, payload, producer))
+        async def attach_or_start(
+            chat_id,
+            payload,
+            producer,
+            *,
+            owner_id="",
+            requester_id=None,
+        ):
+            captured["start_calls"].append(
+                (chat_id, payload, producer, owner_id, requester_id),
+            )
             return object(), True
 
     workspace = SimpleNamespace(
@@ -701,6 +721,40 @@ def test_console_task_lifecycle_keeps_same_server_member_principal(
         and principal is not None
     ]
     assert member_requests == [_MEMBER.to_context(), _MEMBER.to_context()]
+
+
+def test_console_task_status_is_visible_only_to_owner_or_privileged_roles(
+    nocobase_console_client,
+) -> None:
+    client, _captured = nocobase_console_client
+    submitted = client.post(
+        "/api/console/chat/task",
+        headers={"Authorization": "Bearer member-token"},
+        json={
+            "channel": "console",
+            "user_id": "client-user",
+            "session_id": "owned-task",
+            "input": [],
+        },
+    )
+    task_id = submitted.json()["task_id"]
+
+    other = client.get(
+        f"/api/console/chat/task/{task_id}",
+        headers={"Authorization": "Bearer other-member-token"},
+    )
+    admin = client.get(
+        f"/api/console/chat/task/{task_id}",
+        headers={"Authorization": "Bearer admin-token"},
+    )
+    root = client.get(
+        f"/api/console/chat/task/{task_id}",
+        headers={"Authorization": "Bearer root-token"},
+    )
+
+    assert other.status_code == 404
+    assert admin.status_code == 200
+    assert root.status_code == 200
 
 
 async def test_console_task_fixture_cleanup_preserves_snapshot_tasks() -> None:

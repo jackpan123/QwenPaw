@@ -125,6 +125,42 @@ def _deny_detail(config: MutationGuardConfig) -> str:
     return detail or "Mutation permission denied."
 
 
+def guarded_mutation_denial(
+    request: Request,
+    *,
+    route: str,
+    reason: str,
+) -> JSONResponse | None:
+    """Return a consistent denial for a mixed-capability handler.
+
+    Static route declarations remain the primary HTTP boundary. A route that
+    normally provides chat infrastructure can call this before handler side
+    effects when optional request fields upgrade that invocation to a
+    mutation.
+    """
+    config = _load_config()
+    principal = _load_principal(request)
+    if not config.enabled or not principal.guarded or principal.can_mutate:
+        return None
+
+    emit_mutation_audit(
+        "api_mutation_denied",
+        user_id=principal.user_id,
+        roles=principal.roles,
+        source=principal.source,
+        route=route,
+        decision="deny",
+        reason=reason,
+    )
+    return JSONResponse(
+        status_code=403,
+        content={
+            "detail": _deny_detail(config),
+            "code": "mutation_permission_denied",
+        },
+    )
+
+
 # pylint: disable-next=too-few-public-methods
 class MutationAuthorizationMiddleware(BaseHTTPMiddleware):
     """Deny mutating API routes to guarded read-only principals."""

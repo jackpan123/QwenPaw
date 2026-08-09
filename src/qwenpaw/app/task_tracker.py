@@ -20,6 +20,10 @@ logger = logging.getLogger(__name__)
 _SENTINEL = None
 
 
+class RunOwnershipError(PermissionError):
+    """A guarded caller attempted to attach to another caller's run."""
+
+
 @dataclass
 class _RunState:
     """Per-run state (task, queues, buffer), guarded by tracker lock."""
@@ -29,6 +33,7 @@ class _RunState:
     buffer: list[str] = field(default_factory=list)
     start_time: Optional[datetime] = None
     finish_time: Optional[datetime] = None
+    owner_id: str = ""
 
 
 class TaskTracker:
@@ -125,7 +130,12 @@ class TaskTracker:
         except asyncio.TimeoutError:
             return False
 
-    async def attach(self, run_key: str) -> asyncio.Queue | None:
+    async def attach(
+        self,
+        run_key: str,
+        *,
+        requester_id: str | None = None,
+    ) -> asyncio.Queue | None:
         """Attach to an existing run.
 
         Returns a new queue pre-filled with the event buffer, or ``None``
@@ -135,6 +145,8 @@ class TaskTracker:
             state = self._runs.get(run_key)
             if state is None or state.task.done():
                 return None
+            if requester_id is not None and state.owner_id != requester_id:
+                raise RunOwnershipError("run owner mismatch")
             q: asyncio.Queue = asyncio.Queue()
             for sse in state.buffer:
                 q.put_nowait(sse)
@@ -159,8 +171,18 @@ class TaskTracker:
             except ValueError:
                 pass
 
-    async def request_stop(self, run_key: str) -> bool:
-        """Cancel the run. Returns ``True`` if it was running."""
+    async def request_stop(
+        self,
+        run_key: str,
+        *,
+        requester_id: str | None = None,
+    ) -> bool:
+        """Cancel a run when the optional requester owns it.
+
+        ``requester_id=None`` is the trusted operator override used by local,
+        legacy, and privileged callers. Supplying an id fails closed when the
+        run has no matching trusted owner.
+        """
         logger.debug("[STOP] request_stop called for run_key=%s", run_key)
         async with self._lock:
             state = self._runs.get(run_key)
@@ -173,6 +195,12 @@ class TaskTracker:
             if state is None or state.task.done():
                 logger.debug(
                     "[STOP] Cannot stop run_key=%s (not running)",
+                    run_key,
+                )
+                return False
+            if requester_id is not None and state.owner_id != requester_id:
+                logger.warning(
+                    "[STOP] owner mismatch for run_key=%s",
                     run_key,
                 )
                 return False
@@ -194,6 +222,9 @@ class TaskTracker:
         run_key: str,
         payload: Any,
         stream_fn: Callable[..., Coroutine],
+        *,
+        owner_id: str = "",
+        requester_id: str | None = None,
     ) -> tuple[asyncio.Queue, bool]:
         """Attach to an existing run or start a new one.
 
@@ -202,6 +233,8 @@ class TaskTracker:
         async with self._lock:
             state = self._runs.get(run_key)
             if state is not None and not state.task.done():
+                if requester_id is not None and state.owner_id != requester_id:
+                    raise RunOwnershipError("run owner mismatch")
                 q: asyncio.Queue = asyncio.Queue()
                 for sse in state.buffer:
                     q.put_nowait(sse)
@@ -213,6 +246,7 @@ class TaskTracker:
                 task=asyncio.Future(),  # placeholder, replaced below
                 queues=[my_queue],
                 buffer=[],
+                owner_id=owner_id,
             )
             self._runs[run_key] = run
 

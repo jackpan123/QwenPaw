@@ -16,6 +16,8 @@ from ...providers.oauth import (
 )
 from ...providers.oauth.base import OAuthFlow
 from ...providers.provider_manager import ProviderManager
+from ...security.mutation_guard import RouteCapability
+from ..mutation_authorization import api_capability
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +103,7 @@ class OAuthStatusResponse(BaseModel):
     response_model=OAuthStartResponse,
     summary="Start OAuth flow for a provider",
 )
+@api_capability(RouteCapability.MUTATE)
 async def start_oauth(
     provider_id: str,
     request: Request,
@@ -115,6 +118,7 @@ async def start_oauth(
         state=result.state,
         code_verifier="",
         callback_url=callback_url,
+        initiator_user_id=getattr(request.state, "user", "") or "",
     )
 
     return OAuthStartResponse(
@@ -129,6 +133,7 @@ async def start_oauth(
     response_class=HTMLResponse,
     summary="OAuth callback (redirect target)",
 )
+@api_capability(RouteCapability.PUBLIC)
 async def oauth_callback(
     provider_id: str,
     code: str,
@@ -136,19 +141,10 @@ async def oauth_callback(
     manager: ProviderManager = Depends(_get_provider_manager),
 ) -> HTMLResponse:
     """OAuth callback. Exchanges code, saves key, closes popup."""
-    session = _session_store.get(state) if state else None
-    if not session:
-        # Fallback: providers like OpenRouter don't relay state
-        session = _session_store.get_by_provider(provider_id)
+    session = _session_store.claim(state, provider_id) if state else None
     if not session:
         return HTMLResponse(
             content=_error_html("Session expired or invalid."),
-            status_code=400,
-        )
-
-    if session.provider_id != provider_id:
-        return HTMLResponse(
-            content=_error_html("Provider mismatch."),
             status_code=400,
         )
 
@@ -205,6 +201,7 @@ async def oauth_callback(
     response_model=OAuthStatusResponse,
     summary="Poll OAuth flow status",
 )
+@api_capability(RouteCapability.READ)
 async def oauth_status(
     provider_id: str,
     state: str,
