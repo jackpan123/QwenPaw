@@ -4,7 +4,7 @@ QwenPaw includes built-in security features to protect your agent from malicious
 
 ## Overview
 
-QwenPaw's security system consists of five core security layers:
+QwenPaw's security system consists of six core security layers:
 
 ```
 Security Architecture:
@@ -23,9 +23,13 @@ Security Architecture:
 │  Scans for malicious code, hardcoded secrets, and security threats
 │  before skills are enabled
 │
-└─ Access Policy — Declarative access policy
-   Controls who can invoke which capabilities under what conditions
-   with per-tool granularity and source-aware rules
+├─ Access Policy — Declarative access policy
+│  Controls who can invoke which capabilities under what conditions
+│  with per-tool granularity and source-aware rules
+│
+└─ Mutation Guard — NocoBase role-based mutation authorization
+   Allows member chat and read-only work while blocking persistent changes
+   and external side effects
 ```
 
 **Additional feature**: Web Authentication — Optional login protection for the Console interface
@@ -37,7 +41,140 @@ Security Architecture:
 - **Sandbox** executes shell commands inside an OS kernel-enforced isolation boundary, restricting filesystem access to only declared paths
 - **Skill Scanner** runs before skills are enabled to detect malicious code and security threats
 - **Access Policy** evaluates source, identity, and target for each capability invocation — deciding whether to allow, deny, or request human approval
+- **Mutation Guard** uses roles returned live by NocoBase to prevent ordinary members from making persistent changes or external side effects
 - **Web Authentication** (optional) controls access to the Console interface
+
+---
+
+## Mutation Guard
+
+**Mutation Guard** separates authenticated NocoBase users into privileged roles that may make changes and read-only members. It does not disable ordinary conversation; it authorizes the operation when the agent is about to change persistent or external state.
+
+### Identity, roles, and permissions
+
+- NocoBase validates the token. QwenPaw uses the caller's own NocoBase user token to request `GET /api/auth:check?appends=roles` and reads current roles from that response; roles claimed in the request body, query string, or custom role headers are not trusted. Successful identity results are cached briefly for about 60 seconds.
+- The default privileged roles are `admin` and `root`. Matching is **exact and case-insensitive**: `Admin` matches `admin`, but `administrator` does not. Any one matching privileged role is sufficient.
+- Non-privileged roles such as `member` may chat, query data, and request tutorials, explanations, code snippets, or configuration examples. They may not ask the agent to actually rename itself, write memory, create/modify/delete files, change QwenPaw configuration, send external messages, submit forms, or call write APIs.
+- The intent classifier is only an early **UX precheck** that can return a friendly denial. The security boundary is formed by the HTTP route, action-effect, tool, driver, and command gates on execution paths. Those gates still deny member mutations if classification times out, fails, or returns an ambiguous result.
+- The role gate applies only when QwenPaw authentication and Mutation Guard are both enabled and the resolved identity comes from NocoBase. With `QWENPAW_AUTH_ENABLED` disabled, local/unauthenticated operation does not enable this NocoBase role gate. Local requests matching `security.allow_no_auth_hosts` also bypass authentication and the role gate.
+
+These decisions use each caller's ordinary NocoBase user token, not `QWENPAW_NOCOBASE_API_TOKEN`. Members, `admin`, and `root` users all present their own user tokens; the plugin `api_token` is only for the user/role administration views.
+
+### Configuration
+
+Manage this in the Console under **Settings → Security → Mutation Guard**. You can also edit `security.mutation_guard` in `config.json`. The following is the nested `config.json` shape:
+
+```json
+{
+  "security": {
+    "mutation_guard": {
+      "enabled": true,
+      "privileged_roles": ["admin", "root"],
+      "intent_precheck_enabled": true,
+      "classifier_timeout_seconds": 8,
+      "deny_message": "当前账号没有执行变更操作的权限。你仍然可以询问相关操作方法或获取示例。"
+    }
+  }
+}
+```
+
+`GET /api/config/security/mutation-guard` returns a flat guard object. `PUT` must send that flat shape as-is, **without** a `security.mutation_guard` wrapper:
+
+```json
+{
+  "enabled": true,
+  "privileged_roles": ["admin", "root"],
+  "intent_precheck_enabled": true,
+  "classifier_timeout_seconds": 8,
+  "deny_message": "当前账号没有执行变更操作的权限。你仍然可以询问相关操作方法或获取示例。"
+}
+```
+
+| Field                        | Default                                                                  | Description                                                                                                                            |
+| ---------------------------- | ------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `enabled`                    | `true`                                                                   | Enables role-based mutation authorization. When disabled, NocoBase roles no longer restrict mutations.                                 |
+| `privileged_roles`           | `["admin", "root"]`                                                      | NocoBase roles allowed to mutate. At least one non-blank value is required; values are trimmed, case-folded, and deduplicated on save. |
+| `intent_precheck_enabled`    | `true`                                                                   | Enables the chat intent UX precheck. Disabling it does not disable the execution-path security gates.                                  |
+| `classifier_timeout_seconds` | `8`                                                                      | Intent-classifier timeout in seconds; must be an integer from `1` to `60`.                                                             |
+| `deny_message`               | `当前账号没有执行变更操作的权限。你仍然可以询问相关操作方法或获取示例。` | User-facing text for chat and tool denials. HTTP 403 `detail` uses its first line/first Chinese sentence.                              |
+
+### Denial responses
+
+When a non-privileged member calls a mutating HTTP endpoint directly, QwenPaw responds before the handler runs. The `code` is stable and machine-readable; `detail` comes from the configured `deny_message`. With the default configuration:
+
+```http
+HTTP/1.1 403 Forbidden
+Content-Type: application/json
+
+{"detail":"当前账号没有执行变更操作的权限","code":"mutation_permission_denied"}
+```
+
+The chat endpoint is a `CHAT` capability, so a request asking for a real mutation keeps the `200` SSE protocol. When the intent precheck clearly classifies a mutation request, it short-circuits the agent and streams the configured denial text. This abbreviated example retains only the authorization-relevant content fields; dynamic fields such as `msg_id` are omitted:
+
+```text
+data: {"object":"content","type":"text","text":"当前账号没有执行变更操作的权限。你仍然可以询问相关操作方法或获取示例。"}
+```
+
+If the request reaches a tool execution path, the tool denial text also includes the stable marker `mutation_permission_denied`. Do not infer authorization solely from chat wording: HTTP clients should inspect the status and `code`, while SSE clients should consume the stream through its completion event and display the denial text.
+
+### curl acceptance checks
+
+Run these commands against a test instance. First set `QWENPAW_AUTH_ENABLED=true`, enable the `nocobase-auth` plugin, and ensure the test client's IP is not in `security.allow_no_auth_hosts`; when testing on the server itself, you can temporarily set that list to `[]`. All three variables are ordinary NocoBase **user tokens** obtained by logging in as the corresponding users, not the plugin `api_token`. First save the current configuration; the later `PUT` requests write the same values back instead of replacing custom settings:
+
+```bash
+export MEMBER_TOKEN='<member user token>'
+export ADMIN_TOKEN='<user token with the admin role>'
+export ROOT_TOKEN='<user token with the root role>'
+
+curl -sS http://localhost:8088/api/config/security/mutation-guard \
+  -H "X-NocoBase-Token: $ADMIN_TOKEN" \
+  -o mutation-guard-current.json
+```
+
+1. A `member` can read the configuration but cannot write it back. The second command should return `403` and `mutation_permission_denied`:
+
+```bash
+curl -i -sS http://localhost:8088/api/config/security/mutation-guard \
+  -H "X-NocoBase-Token: $MEMBER_TOKEN"
+
+curl -i -sS -X PUT \
+  http://localhost:8088/api/config/security/mutation-guard \
+  -H "X-NocoBase-Token: $MEMBER_TOKEN" \
+  -H "Content-Type: application/json" \
+  --data-binary @mutation-guard-current.json
+```
+
+2. `admin` and `root` exactly match default privileged roles. Writing the unchanged configuration should return `200` for each:
+
+```bash
+curl -i -sS -X PUT \
+  http://localhost:8088/api/config/security/mutation-guard \
+  -H "X-NocoBase-Token: $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  --data-binary @mutation-guard-current.json
+
+curl -i -sS -X PUT \
+  http://localhost:8088/api/config/security/mutation-guard \
+  -H "X-NocoBase-Token: $ROOT_TOKEN" \
+  -H "Content-Type: application/json" \
+  --data-binary @mutation-guard-current.json
+```
+
+3. A `member` tutorial request reaches the agent normally. An actual rename request must not produce any persistent or external side effect:
+
+```bash
+curl -N -sS http://localhost:8088/api/console/chat \
+  -H "X-NocoBase-Token: $MEMBER_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"channel":"console","session_id":"mutation-guard-check","input":[{"role":"user","content":[{"type":"text","text":"Explain how to rename the assistant and show an example; do not make the change"}]}]}'
+
+curl -N -sS http://localhost:8088/api/console/chat \
+  -H "X-NocoBase-Token: $MEMBER_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"channel":"console","session_id":"mutation-guard-check-rename","input":[{"role":"user","content":[{"type":"text","text":"Rename yourself to Robin now"}]}]}'
+```
+
+When the classifier clearly recognizes the second request, the stream contains the precheck denial shown above. If classification times out, fails, or is ambiguous, the request may continue to an agent constrained to read-only behavior; in that case, still verify that the name, memory, files, and configuration did not change. If the agent attempts a mutating tool, the response also contains `mutation_permission_denied`. The security acceptance criterion is **no actual side effect**, not the presence of one particular precheck message on every run.
 
 ---
 
@@ -897,6 +1034,13 @@ Here's a complete `config.json` with all security features configured:
       "mode": "warn",
       "timeout": 30,
       "whitelist": []
+    },
+    "mutation_guard": {
+      "enabled": true,
+      "privileged_roles": ["admin", "root"],
+      "intent_precheck_enabled": true,
+      "classifier_timeout_seconds": 8,
+      "deny_message": "当前账号没有执行变更操作的权限。你仍然可以询问相关操作方法或获取示例。"
     }
   }
 }
@@ -936,16 +1080,16 @@ QwenPaw supports optional web login authentication to protect the Console from u
 
 ### Environment variables
 
-| Variable                        | Description                                                                                                      | Required |
-| -------------------------------- | ------------------------------------------------------------------------------------------------------------------ | -------- |
-| `QWENPAW_AUTH_ENABLED`           | Set to `true` to enable authentication                                                                            | **Yes**  |
-| `QWENPAW_NOCOBASE_ENABLED`       | Set to `true`/`1`/`yes` to enable the NocoBase integration                                                        | Optional |
-| `QWENPAW_NOCOBASE_BASE_URL`      | NocoBase instance URL (e.g. `http://nocobase:13000`)                                                              | Optional |
-| `QWENPAW_NOCOBASE_API_TOKEN`     | NocoBase admin API token — only used for the admin "list users/roles" views, not for login or the access gate     | Optional |
-| `QWENPAW_NOCOBASE_USER_ID_FIELD` | NocoBase user field used as the channel sender ID (default `email`)                                               | Optional |
-| `QWENPAW_NOCOBASE_AUTHENTICATOR` | NocoBase authenticator name used for password sign-in (default `basic`)                                           | Optional |
+| Variable                         | Description                                                                                                   | Required |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------- | -------- |
+| `QWENPAW_AUTH_ENABLED`           | Set to `true` to enable authentication                                                                        | **Yes**  |
+| `QWENPAW_NOCOBASE_ENABLED`       | Set to `true`/`1`/`yes` to enable the NocoBase integration                                                    | Optional |
+| `QWENPAW_NOCOBASE_BASE_URL`      | NocoBase instance URL (e.g. `http://nocobase:13000`)                                                          | Optional |
+| `QWENPAW_NOCOBASE_API_TOKEN`     | NocoBase admin API token — only used for the admin "list users/roles" views, not for login or the access gate | Optional |
+| `QWENPAW_NOCOBASE_USER_ID_FIELD` | NocoBase user field used as the channel sender ID (default `email`)                                           | Optional |
+| `QWENPAW_NOCOBASE_AUTHENTICATOR` | NocoBase authenticator name used for password sign-in (default `basic`)                                       | Optional |
 
-These `QWENPAW_NOCOBASE_*` variables are only consulted to *seed* `~/.qwenpaw/nocobase_auth_config.json` on first run, when that file doesn't exist yet. Once the file exists, manage the connection (including the role→channel map) from the plugin's admin page in the Console.
+These `QWENPAW_NOCOBASE_*` variables are only consulted to _seed_ `~/.qwenpaw/nocobase_auth_config.json` on first run, when that file doesn't exist yet. Once the file exists, manage the connection (including the role→channel map) from the plugin's admin page in the Console.
 
 ### Auth-bypass host whitelist
 
@@ -960,7 +1104,7 @@ In `config.json`, the `security.allow_no_auth_hosts` field specifies client IP a
 ```
 
 | Field                 | Type          | Default                | Description                                                                          |
-| --------------------- | ------------- | ----------------------- | -------------------------------------------------------------------------------------- |
+| --------------------- | ------------- | ---------------------- | ------------------------------------------------------------------------------------ |
 | `allow_no_auth_hosts` | array[string] | `["127.0.0.1", "::1"]` | Client IP addresses allowed to access `/api/*` routes without authentication tokens. |
 
 This can also be managed from the Console under **Settings → Security**.
@@ -1099,15 +1243,15 @@ Click the **Logout** button at the bottom of the sidebar in the Console:
 
 ### Security details
 
-| Feature               | Detail                                                                                     |
-| --------------------- | ------------------------------------------------------------------------------------------- |
-| Account storage        | None — accounts, passwords, and roles are owned entirely by NocoBase                       |
-| Token format          | Issued by NocoBase; format and expiry are controlled by NocoBase's authenticator config     |
-| Token storage         | Browser localStorage, cleared on logout or 401 response                                    |
-| Connection secrets    | `QWENPAW_NOCOBASE_API_TOKEN` is encrypted at rest in `nocobase_auth_config.json`            |
-| File permissions      | `nocobase_auth_config.json` written with `0o600` (owner read/write only)                   |
-| Localhost bypass      | Requests from `127.0.0.1` / `::1` skip auth (CLI access unaffected)                         |
-| CORS preflight        | `OPTIONS` requests pass through without auth check                                         |
-| WebSocket auth        | Token passed via query parameter, restricted to upgrade requests only                      |
-| Protected routes      | Only `/api/*` routes require authentication                                                |
-| Public routes         | `/api/auth/login`, `/api/auth/status`, `/api/version`, static assets                       |
+| Feature               | Detail                                                                                                                              |
+| --------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| Account storage       | None — accounts, passwords, and roles are owned entirely by NocoBase                                                                |
+| Token format          | Issued by NocoBase; format and expiry are controlled by NocoBase's authenticator config                                             |
+| Token storage         | Browser localStorage, cleared on logout or 401 response                                                                             |
+| Connection secrets    | `QWENPAW_NOCOBASE_API_TOKEN` is encrypted at rest in `nocobase_auth_config.json`                                                    |
+| File permissions      | `nocobase_auth_config.json` written with `0o600` (owner read/write only)                                                            |
+| Localhost bypass      | Requests from `127.0.0.1` / `::1` skip auth (CLI access unaffected)                                                                 |
+| CORS preflight        | `OPTIONS` requests pass through without auth check                                                                                  |
+| Query-string token    | The NocoBase resolver accepts `?token=` on any request; headers are preferred so tokens do not appear in URLs or access logs        |
+| Protected routes      | Except for explicit public entries, `/api/*`, `/cron`/`/crons` management routes, and non-API write requests require authentication |
+| Public route examples | `/api/auth/login`, `/api/auth/status`, `/api/version`, and static assets; the server allowlist is authoritative                     |
