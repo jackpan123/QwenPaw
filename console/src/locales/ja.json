@@ -2173,6 +2173,21 @@
     "saveSuccess": "ツールガード設定を保存しました",
     "saveFailed": "ツールガード設定の保存に失敗しました",
     "loadFailed": "ツールガード設定の読み込みに失敗しました",
+    "mutationGuard": {
+      "title": "変更ガード",
+      "description": "永続的または外部の変更を求める会話を特権ロールに制限します。",
+      "enabled": "変更ガードを有効にする",
+      "privilegedRoles": "特権ロール",
+      "removeRole": "ロール {{role}} を削除",
+      "rolesPlaceholder": "ロールを入力して Enter キーを押す",
+      "intentPrecheck": "意図の事前チェックを有効にする",
+      "classifierTimeout": "分類タイムアウト（秒）",
+      "timeoutInvalid": "1～60 の整数を入力してください",
+      "denyMessage": "権限拒否メッセージ",
+      "loadFailed": "変更ガード設定の読み込みに失敗しました",
+      "saveSuccess": "変更ガード設定を保存しました",
+      "saveFailed": "変更ガード設定の保存に失敗しました"
+    },
     "rules": {
       "title": "検出ルール",
       "description": "ルールはセキュリティアラートをトリガーする正規表現パターンを定義します。組み込みルールは無効化でき、カスタムルールは追加・編集・削除できます。",

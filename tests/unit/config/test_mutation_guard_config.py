@@ -61,3 +61,17 @@ def test_classifier_timeout_accepts_inclusive_boundaries(timeout):
 def test_classifier_timeout_rejects_values_outside_boundaries(timeout):
     with pytest.raises(ValidationError):
         MutationGuardConfig(classifier_timeout_seconds=timeout)
+
+
+def test_privileged_roles_are_trimmed_casefolded_and_deduplicated():
+    config = MutationGuardConfig(
+        privileged_roles=[" Admin ", "ROOT", "admin"],
+    )
+
+    assert config.privileged_roles == ["admin", "root"]
+
+
+@pytest.mark.parametrize("roles", [[], [""], ["   "]])
+def test_privileged_roles_reject_empty_values(roles):
+    with pytest.raises(ValidationError):
+        MutationGuardConfig(privileged_roles=roles)

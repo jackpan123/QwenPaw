@@ -2416,6 +2416,21 @@
     "saveSuccess": "Tool guard Configuracoes saved",
     "saveFailed": "Falha ao Salvar tool guard Configuracoes",
     "loadFailed": "Falha ao load tool guard Configuracoes",
+    "mutationGuard": {
+      "title": "Proteção de alterações",
+      "description": "Restringe conversas que solicitam alterações persistentes ou externas a funções privilegiadas.",
+      "enabled": "Ativar proteção de alterações",
+      "privilegedRoles": "Funções privilegiadas",
+      "removeRole": "Remover função {{role}}",
+      "rolesPlaceholder": "Digite uma função e pressione Enter",
+      "intentPrecheck": "Ativar pré-verificação de intenção",
+      "classifierTimeout": "Tempo limite do classificador (segundos)",
+      "timeoutInvalid": "Digite um número inteiro de 1 a 60",
+      "denyMessage": "Mensagem de permissão negada",
+      "loadFailed": "Falha ao carregar a proteção de alterações",
+      "saveSuccess": "Configurações da proteção de alterações salvas",
+      "saveFailed": "Falha ao salvar a proteção de alterações"
+    },
     "rules": {
       "title": "Detection Rules",
       "description": "Rules define regex patterns that trigger security alerts. Built-in rules can be disabled; custom rules can be added, edited, or deleted.",

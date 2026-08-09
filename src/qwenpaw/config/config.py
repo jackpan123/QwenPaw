@@ -2306,6 +2306,22 @@ class MutationGuardConfig(BaseModel):
         "你仍然可以询问相关操作方法或获取示例。"
     )
 
+    @field_validator("privileged_roles")
+    @classmethod
+    def _normalize_privileged_roles(cls, roles: List[str]) -> List[str]:
+        normalized: List[str] = []
+        seen: set[str] = set()
+        for role in roles:
+            value = role.strip().casefold()
+            if not value:
+                raise ValueError("privileged roles must not be blank")
+            if value not in seen:
+                seen.add(value)
+                normalized.append(value)
+        if not normalized:
+            raise ValueError("at least one privileged role is required")
+        return normalized
+
 
 class SecurityConfig(BaseModel):
     """Top-level ``security`` section in config.json."""

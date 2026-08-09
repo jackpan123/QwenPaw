@@ -5,7 +5,11 @@ vi.mock("../request", () => ({
 }));
 
 import { securityApi } from "./security";
-import type { ToolGuardConfig, SkillScannerConfig } from "./security";
+import type {
+  MutationGuardConfig,
+  ToolGuardConfig,
+  SkillScannerConfig,
+} from "./security";
 import { request } from "../request";
 
 describe("securityApi", () => {
@@ -46,6 +50,42 @@ describe("securityApi", () => {
     vi.mocked(request).mockResolvedValue(config);
     const result = await securityApi.updateToolGuard(config);
     expect(request).toHaveBeenCalledWith("/config/security/tool-guard", {
+      method: "PUT",
+      body: JSON.stringify(config),
+    });
+    expect(result).toEqual(config);
+  });
+
+  it("getMutationGuard calls GET mutation-guard endpoint", async () => {
+    const config: MutationGuardConfig = {
+      enabled: true,
+      privileged_roles: ["admin", "root"],
+      intent_precheck_enabled: true,
+      classifier_timeout_seconds: 8,
+      deny_message: "denied",
+    };
+    vi.mocked(request).mockResolvedValue(config);
+
+    const result = await securityApi.getMutationGuard();
+
+    expect(request).toHaveBeenCalledWith("/config/security/mutation-guard");
+    expect(result).toEqual(config);
+  });
+
+  it("updateMutationGuard sends PUT without updating Tool Guard", async () => {
+    const config: MutationGuardConfig = {
+      enabled: false,
+      privileged_roles: ["admin", "root"],
+      intent_precheck_enabled: false,
+      classifier_timeout_seconds: 12,
+      deny_message: "members cannot change settings",
+    };
+    vi.mocked(request).mockResolvedValue(config);
+
+    const result = await securityApi.updateMutationGuard(config);
+
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(request).toHaveBeenCalledWith("/config/security/mutation-guard", {
       method: "PUT",
       body: JSON.stringify(config),
     });

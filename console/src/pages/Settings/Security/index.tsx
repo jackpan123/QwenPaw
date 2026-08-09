@@ -8,6 +8,7 @@ import {
   SkillScannerSection,
   FileGuardSection,
   AllowNoAuthHostsTab,
+  MutationGuardTab,
 } from "./components";
 import { PageHeader } from "@/components/PageHeader";
 import styles from "./index.module.less";
@@ -123,6 +124,15 @@ function SecurityPage() {
                   toggleShellEvasionCheck={toggleShellEvasionCheck}
                 />
               ),
+            },
+            {
+              key: "mutationGuard",
+              label: (
+                <span className={styles.tabLabel}>
+                  {t("security.mutationGuard.title")}
+                </span>
+              ),
+              children: <MutationGuardTab />,
             },
             {
               key: "fileGuard",

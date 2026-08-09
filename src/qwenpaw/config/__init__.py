@@ -25,6 +25,7 @@ from .utils import (
     load_config,
     save_config,
     strict_validate_config_file,
+    update_config_transaction,
     update_last_dispatch,
     get_dream_cron,
 )
@@ -54,5 +55,6 @@ __all__ = [
     "load_config",
     "save_config",
     "strict_validate_config_file",
+    "update_config_transaction",
     "update_last_dispatch",
 ]

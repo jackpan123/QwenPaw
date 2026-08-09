@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from unittest.mock import patch
 
 import pytest
 from fastapi import APIRouter, FastAPI, Request
@@ -687,3 +688,44 @@ def test_api_capability_normalizes_valid_strings_and_rejects_invalid_values():
         api_capability("unknown")
     with pytest.raises(TypeError, match="RouteCapability or str"):
         api_capability(object())  # type: ignore[arg-type]
+
+
+@pytest.mark.p0
+def test_member_cannot_update_mutation_guard_config():
+    from qwenpaw.app.routers.config import router as config_router
+
+    app = FastAPI()
+    app.include_router(config_router, prefix="/api")
+    app.add_middleware(
+        MutationAuthorizationMiddleware,
+        config_loader=MutationGuardConfig,
+        principal_loader=lambda _request: MEMBER,
+    )
+
+    events = []
+    with (
+        patch(
+            "qwenpaw.app.routers.config.update_config_transaction",
+        ) as update_mock,
+        patch(
+            "qwenpaw.app.mutation_authorization.emit_mutation_audit",
+            side_effect=lambda event, **fields: events.append(
+                (event, fields),
+            ),
+        ),
+    ):
+        response = TestClient(app).put(
+            "/api/config/security/mutation-guard",
+            json={
+                "enabled": False,
+                "privileged_roles": ["admin", "root"],
+                "intent_precheck_enabled": False,
+                "classifier_timeout_seconds": 8,
+                "deny_message": "disabled by member",
+            },
+        )
+
+    assert response.status_code == 403
+    assert response.json()["code"] == "mutation_permission_denied"
+    assert events[0][1]["route"] == ("PUT /api/config/security/mutation-guard")
+    update_mock.assert_not_called()

@@ -1263,6 +1263,21 @@
     "saveSuccess": "Đã lưu cài đặt Tool Guard",
     "saveFailed": "Lưu cài đặt thất bại",
     "loadFailed": "Tải cài đặt thất bại",
+    "mutationGuard": {
+      "title": "Bảo vệ thay đổi",
+      "description": "Chỉ cho phép vai trò đặc quyền yêu cầu thay đổi lâu dài hoặc bên ngoài qua hội thoại.",
+      "enabled": "Bật bảo vệ thay đổi",
+      "privilegedRoles": "Vai trò đặc quyền",
+      "removeRole": "Xóa vai trò {{role}}",
+      "rolesPlaceholder": "Nhập vai trò rồi nhấn Enter",
+      "intentPrecheck": "Bật kiểm tra trước ý định",
+      "classifierTimeout": "Thời gian chờ phân loại (giây)",
+      "timeoutInvalid": "Nhập số nguyên từ 1 đến 60",
+      "denyMessage": "Thông báo từ chối quyền",
+      "loadFailed": "Tải cài đặt bảo vệ thay đổi thất bại",
+      "saveSuccess": "Đã lưu cài đặt bảo vệ thay đổi",
+      "saveFailed": "Lưu cài đặt bảo vệ thay đổi thất bại"
+    },
     "fileGuard": {
       "title": "File Guard",
       "description": "Bảo vệ các file và thư mục nhạy cảm khỏi bị truy cập bởi công cụ agent.",

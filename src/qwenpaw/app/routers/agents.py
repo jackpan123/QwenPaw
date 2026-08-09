@@ -20,6 +20,7 @@ from qwenpaw.exceptions import (
 from ...agents.utils.file_handling import read_text_file_with_encoding_fallback
 from ..utils import schedule_agent_reload
 from ...config.config import (
+    Config,
     AgentProfileConfig,
     AgentProfileRef,
     ModelSlotConfig,
@@ -29,7 +30,7 @@ from ...config.config import (
     sanitize_agent_id,
     validate_agent_id,
 )
-from ...config.utils import load_config, save_config
+from ...config.utils import load_config, update_config_transaction
 from ...agents.utils import copy_workspace_md_files, normalize_agent_language
 from ...agents.skill_system import SkillPoolService, get_workspace_skills_dir
 from ..agent_startup import AgentStartupStatus
@@ -287,34 +288,33 @@ async def reorder_agents(
     reorder_request: ReorderAgentsRequest = Body(...),
 ) -> dict:
     """Persist the full ordered list of agent IDs."""
-    config = load_config()
-    configured_ids = list(config.agents.profiles.keys())
 
-    if len(reorder_request.agent_ids) != len(set(reorder_request.agent_ids)):
-        raise HTTPException(
-            status_code=400,
-            detail="Each configured agent ID must appear exactly once.",
-        )
+    def update(config: Config) -> None:
+        configured_ids = list(config.agents.profiles.keys())
+        if len(reorder_request.agent_ids) != len(
+            set(reorder_request.agent_ids),
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="Each configured agent ID must appear exactly once.",
+            )
+        if set(reorder_request.agent_ids) != set(configured_ids):
+            raise HTTPException(
+                status_code=400,
+                detail="Each configured agent ID must appear exactly once.",
+            )
+        if not _is_valid_display_order(config, reorder_request.agent_ids):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Agent order must keep default first and pinned agents "
+                    "before unpinned agents."
+                ),
+            )
+        config.agents.agent_order = list(reorder_request.agent_ids)
 
-    if set(reorder_request.agent_ids) != set(configured_ids):
-        raise HTTPException(
-            status_code=400,
-            detail="Each configured agent ID must appear exactly once.",
-        )
-
-    if not _is_valid_display_order(config, reorder_request.agent_ids):
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "Agent order must keep default first and pinned agents "
-                "before unpinned agents."
-            ),
-        )
-
-    config.agents.agent_order = list(reorder_request.agent_ids)
-    save_config(config)
-
-    return {"success": True, "agent_ids": config.agents.agent_order}
+    updated = update_config_transaction(update)
+    return {"success": True, "agent_ids": updated.agents.agent_order}
 
 
 @router.patch(
@@ -327,25 +327,25 @@ async def set_agent_pinned(
     pinned: bool = Body(..., embed=True),
 ) -> dict:
     """Persist an agent's pinned state without changing enabled state."""
-    config = load_config()
 
-    if agentId not in config.agents.profiles:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Agent '{agentId}' not found",
-        )
-
-    if agentId == "default" and not pinned:
-        raise HTTPException(
-            status_code=400,
-            detail="Cannot unpin the default agent",
-        )
-
-    agent_ref = config.agents.profiles[agentId]
-    if agentId != "default":
+    def update(config: Config) -> None:
+        if agentId not in config.agents.profiles:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Agent '{agentId}' not found",
+            )
+        if agentId == "default" and not pinned:
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot unpin the default agent",
+            )
+        if agentId == "default":
+            return
+        agent_ref = config.agents.profiles[agentId]
         agent_ref.pinned = pinned
         config.agents.agent_order = _display_agent_order(config)
-        save_config(config)
+
+    update_config_transaction(update)
 
     return {
         "success": True,
@@ -474,9 +474,16 @@ async def create_agent(
         enabled=True,
     )
 
-    config.agents.profiles[new_id] = agent_ref
-    config.agents.agent_order = _normalized_agent_order(config)
-    save_config(config)
+    def update(config: Config) -> None:
+        if new_id in config.agents.profiles:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Agent '{new_id}' already exists",
+            )
+        config.agents.profiles[new_id] = agent_ref
+        config.agents.agent_order = _normalized_agent_order(config)
+
+    update_config_transaction(update)
     save_agent_config(new_id, agent_config)
 
     logger.info(f"Created new agent: {new_id} (name={request.name})")
@@ -568,48 +575,89 @@ async def copy_agent(
     except (ValueError, AppBaseException) as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
 
-    source_workspace = Path(
-        config.agents.profiles[agentId].workspace_dir,
-    ).expanduser()
+    source_profile = config.agents.profiles[agentId].model_copy(deep=True)
+    source_workspace = (
+        Path(source_profile.workspace_dir).expanduser().resolve()
+    )
 
     existing_ids = set(config.agents.profiles.keys())
     new_id = _generate_unique_id(existing_ids)
     new_name = (request.name or "").strip() or f"{source_config.name} Copy"
     workspace_dir = Path(f"{WORKING_DIR}/workspaces/{new_id}").expanduser()
-    workspace_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        workspace_dir.mkdir(parents=True)
+    except FileExistsError as e:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Workspace for agent '{new_id}' already exists",
+        ) from e
 
-    language = normalize_agent_language(
-        source_config.language or config.agents.language or "en",
-    )
+    try:
+        language = normalize_agent_language(
+            source_config.language or config.agents.language or "en",
+        )
 
-    agent_config = _build_copied_agent_config(
-        source_config=source_config,
-        new_id=new_id,
-        new_name=new_name,
-        workspace_dir=workspace_dir,
-    )
+        agent_config = _build_copied_agent_config(
+            source_config=source_config,
+            new_id=new_id,
+            new_name=new_name,
+            workspace_dir=workspace_dir,
+        )
 
-    _initialize_agent_workspace(
-        workspace_dir,
-        skill_names=[],
-        language=language,
-        apply_md_templates=request.copy_md_files,
-    )
-    _copy_selected_workspace_files(
-        request=request,
-        source_workspace=source_workspace,
-        workspace_dir=workspace_dir,
-    )
+        _initialize_agent_workspace(
+            workspace_dir,
+            skill_names=[],
+            language=language,
+            apply_md_templates=request.copy_md_files,
+        )
+        _copy_selected_workspace_files(
+            request=request,
+            source_workspace=source_workspace,
+            workspace_dir=workspace_dir,
+        )
 
-    agent_ref = AgentProfileRef(
-        id=new_id,
-        workspace_dir=str(workspace_dir),
-        enabled=True,
-    )
+        agent_ref = AgentProfileRef(
+            id=new_id,
+            workspace_dir=str(workspace_dir),
+            enabled=True,
+        )
 
-    config.agents.profiles[new_id] = agent_ref
-    config.agents.agent_order = _normalized_agent_order(config)
-    save_config(config)
+        def update(config: Config) -> None:
+            if agentId not in config.agents.profiles:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Agent '{agentId}' not found",
+                )
+            current_source = config.agents.profiles[agentId]
+            try:
+                current_source_workspace = (
+                    Path(current_source.workspace_dir).expanduser().resolve()
+                )
+            except (OSError, RuntimeError) as e:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Agent '{agentId}' changed while being copied",
+                ) from e
+            if (
+                current_source.id != source_profile.id
+                or current_source_workspace != source_workspace
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Agent '{agentId}' changed while being copied",
+                )
+            if new_id in config.agents.profiles:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Agent '{new_id}' already exists",
+                )
+            config.agents.profiles[new_id] = agent_ref
+            config.agents.agent_order = _normalized_agent_order(config)
+
+        update_config_transaction(update)
+    except Exception:
+        shutil.rmtree(workspace_dir, ignore_errors=True)
+        raise
     save_agent_config(new_id, agent_config)
 
     logger.info(
@@ -748,9 +796,16 @@ async def delete_agent(
         )
     await manager.stop_agent(agentId)
 
-    del config.agents.profiles[agentId]
-    config.agents.agent_order = _normalized_agent_order(config)
-    save_config(config)
+    def update(config: Config) -> None:
+        if agentId not in config.agents.profiles:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Agent '{agentId}' not found",
+            )
+        del config.agents.profiles[agentId]
+        config.agents.agent_order = _normalized_agent_order(config)
+
+    update_config_transaction(update)
 
     return {"success": True, "agent_id": agentId}
 
@@ -795,8 +850,15 @@ async def toggle_agent_enabled(
     if not enabled and getattr(agent_ref, "enabled", True):
         await manager.stop_agent(agentId)
 
-    agent_ref.enabled = enabled
-    save_config(config)
+    def update(config: Config) -> None:
+        if agentId not in config.agents.profiles:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Agent '{agentId}' not found",
+            )
+        config.agents.profiles[agentId].enabled = enabled
+
+    update_config_transaction(update)
 
     if enabled:
         manager.schedule_agent_startup(agentId)

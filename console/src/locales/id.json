@@ -631,6 +631,21 @@
     "saveSuccess": "Pengaturan Tool Guard tersimpan",
     "saveFailed": "Gagal menyimpan pengaturan Tool Guard",
     "loadFailed": "Gagal memuat pengaturan Tool Guard",
+    "mutationGuard": {
+      "title": "Mutation Guard",
+      "description": "Batasi percakapan yang meminta perubahan permanen atau eksternal hanya untuk peran istimewa.",
+      "enabled": "Aktifkan Mutation Guard",
+      "privilegedRoles": "Peran istimewa",
+      "removeRole": "Hapus peran {{role}}",
+      "rolesPlaceholder": "Ketik peran lalu tekan Enter",
+      "intentPrecheck": "Aktifkan pemeriksaan awal niat",
+      "classifierTimeout": "Batas waktu klasifikasi (detik)",
+      "timeoutInvalid": "Masukkan bilangan bulat dari 1 hingga 60",
+      "denyMessage": "Pesan penolakan izin",
+      "loadFailed": "Gagal memuat pengaturan Mutation Guard",
+      "saveSuccess": "Pengaturan Mutation Guard tersimpan",
+      "saveFailed": "Gagal menyimpan pengaturan Mutation Guard"
+    },
     "rules": {
       "title": "Aturan Deteksi",
       "description": "Aturan menentukan pola regex yang memicu peringatan keamanan.",

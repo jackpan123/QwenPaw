@@ -9,7 +9,8 @@ from agentscope.message import TextBlock
 from agentscope.tool import ToolChunk
 from agentscope.message import ToolResultState
 
-from ...config import load_config, save_config
+from ...config import load_config, update_config_transaction
+from ...config.config import Config
 from ...runtime.tool_registry import tool_descriptor
 
 logger = logging.getLogger(__name__)
@@ -103,9 +104,10 @@ async def set_user_timezone(timezone_name: str) -> ToolChunk:
             ],
         )
 
-    config = load_config()
-    config.user_timezone = tz_name
-    save_config(config)
+    def update(config: Config) -> None:
+        config.user_timezone = tz_name
+
+    update_config_transaction(update)
 
     time_str = (
         f"{now.strftime('%Y-%m-%d %H:%M:%S')} {tz_name} ({now.strftime('%A')})"
