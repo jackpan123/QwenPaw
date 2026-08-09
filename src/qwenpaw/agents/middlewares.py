@@ -182,6 +182,9 @@ class MemoryMiddleware(MiddlewareBase):
         pending_markers = self._auto_memory_turn_state(agent)["pending"]
         if not pending_markers:
             return
+        if not self._auto_memory_allowed(agent):
+            pending_markers.clear()
+            return
 
         if count is None:
             turn_markers = list(pending_markers)
@@ -223,6 +226,61 @@ class MemoryMiddleware(MiddlewareBase):
             return False
         source = str(request_context.get("source") or "").strip().lower()
         return source in _AUTOMATION_MEMORY_SKIP_SOURCES
+
+    @staticmethod
+    def _auto_memory_allowed(agent: "Agent") -> bool:
+        """Authorize automatic persistent memory before backend execution."""
+        from ..config.utils import load_config
+        from ..security.mutation_guard import (
+            ActionEffect,
+            MutationDecision,
+            RequestPrincipal,
+            authorize_effect,
+            emit_mutation_audit,
+        )
+
+        request_context = getattr(agent, "_request_context", None)
+        if type(request_context) is not dict:
+            request_context = {}
+        principal = RequestPrincipal.from_context(
+            request_context.get("request_principal"),
+        )
+        # Local/auth-disabled and server-authorized principals can be
+        # accepted from the trusted request snapshot without configuration
+        # I/O. This also keeps their existing behavior if config reload fails.
+        if principal.can_mutate:
+            return True
+
+        try:
+            decision = authorize_effect(
+                principal,
+                ActionEffect.MUTATE,
+                load_config().security.mutation_guard,
+            )
+        except Exception:  # pylint: disable=broad-except
+            logger.exception(
+                "MemoryMiddleware mutation guard config unavailable",
+            )
+            decision = MutationDecision(
+                False,
+                "mutation_guard_config_unavailable",
+            )
+        if decision.allowed:
+            return True
+
+        emit_mutation_audit(
+            "auto_memory_denied",
+            effect=ActionEffect.MUTATE.value,
+            decision="deny",
+            reason=decision.reason,
+            user_id=principal.user_id,
+            roles=list(principal.roles),
+            source=principal.source,
+            agent_id=str(request_context.get("agent_id") or agent.name),
+            session_id=MemoryMiddleware._agent_session_id(agent),
+            channel=str(request_context.get("channel") or ""),
+        )
+        return False
 
     @staticmethod
     async def _will_compress_context(
