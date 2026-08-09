@@ -501,6 +501,73 @@ class TestWillCompressContextBoundary:
 
 class TestFlushAutoMemoryDefensiveGuard:
     @pytest.mark.asyncio
+    async def test_member_marker_cannot_leak_into_later_admin_flush(
+        self,
+        caplog,
+    ):
+        """A role transition must not authorize an earlier member turn."""
+        mm = _make_memory_manager(interval=2)
+        mw = MemoryMiddleware(memory_manager=mm)
+        agent = _make_agent(source="user")
+        _set_principal(
+            agent,
+            roles=["member"],
+            guarded=True,
+            can_mutate=False,
+        )
+        member_query = _user_msg("普通成员消息", msg_id="member-turn")
+        member_reply = Msg(
+            name="agent",
+            role="assistant",
+            content=[TextBlock(text="member reply")],
+        )
+        agent.state.context = [member_query, member_reply]
+
+        async def _next(**_kwargs):
+            yield "done"
+
+        config_loader = MagicMock(return_value=_guard_config())
+        with patch(
+            "qwenpaw.config.utils.load_config",
+            config_loader,
+        ), caplog.at_level(
+            "INFO",
+            logger="qwenpaw.security.mutation_guard.audit",
+        ):
+            async for _ in mw.on_reply(agent, {}, _next):
+                pass
+            pending_after_member = list(_auto_memory_turn_state(mm)["pending"])
+
+            _set_principal(
+                agent,
+                roles=["admin"],
+                guarded=True,
+                can_mutate=True,
+            )
+            mm.get_auto_memory_interval.return_value = 1
+            admin_query = _user_msg("管理员消息", msg_id="admin-turn")
+            admin_reply = Msg(
+                name="agent",
+                role="assistant",
+                content=[TextBlock(text="admin reply")],
+            )
+            agent.state.context.extend([admin_query, admin_reply])
+            async for _ in mw.on_reply(agent, {}, _next):
+                pass
+
+        assert not pending_after_member
+        mm.auto_memory.assert_awaited_once()
+        assert mm.auto_memory.await_args.args[0] == [admin_query, admin_reply]
+        assert config_loader.call_count == 1
+        audits = [
+            record.getMessage()
+            for record in caplog.records
+            if "[MUTATION AUDIT]" in record.getMessage()
+        ]
+        assert len(audits) == 1
+        assert "auto_memory_denied" in audits[0]
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "message",
         [

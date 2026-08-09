@@ -128,18 +128,23 @@ class MemoryMiddleware(MiddlewareBase):
         if len(seen_markers) > MAX_AUTO_MEMORY_TURN_MARKERS:
             oldest_key = next(iter(seen_markers))
             seen_markers.pop(oldest_key)
-        pending_markers.append(turn_marker)
 
         interval = self._auto_memory_interval()
         if interval <= 0:
             pending_markers.clear()
             return
+        authorization_allowed = self._auto_memory_allowed(agent)
+        if not authorization_allowed:
+            return
+
+        pending_markers.append(turn_marker)
         if len(pending_markers) < interval:
             return
 
         await self._flush_auto_memory(
             agent,
             count=interval,
+            authorization_allowed=authorization_allowed,
         )
 
     async def on_compress_context(
@@ -168,6 +173,7 @@ class MemoryMiddleware(MiddlewareBase):
         agent: "Agent",
         *,
         count: int | None = None,
+        authorization_allowed: bool | None = None,
     ) -> None:
         if self._is_automation_request(agent):
             logger.debug(
@@ -182,7 +188,9 @@ class MemoryMiddleware(MiddlewareBase):
         pending_markers = self._auto_memory_turn_state(agent)["pending"]
         if not pending_markers:
             return
-        if not self._auto_memory_allowed(agent):
+        if authorization_allowed is None:
+            authorization_allowed = self._auto_memory_allowed(agent)
+        if not authorization_allowed:
             pending_markers.clear()
             return
 
