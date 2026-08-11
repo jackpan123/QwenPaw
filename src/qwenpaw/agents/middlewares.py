@@ -135,6 +135,7 @@ class MemoryMiddleware(MiddlewareBase):
             return
         authorization_allowed = self._auto_memory_allowed(agent)
         if not authorization_allowed:
+            pending_markers.clear()
             return
 
         pending_markers.append(turn_marker)

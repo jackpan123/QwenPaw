@@ -501,6 +501,90 @@ class TestWillCompressContextBoundary:
 
 class TestFlushAutoMemoryDefensiveGuard:
     @pytest.mark.asyncio
+    async def test_member_turn_breaks_admin_memory_batch(self, caplog):
+        """Admin turns on either side must not span a denied member turn."""
+        mm = _make_memory_manager(interval=2)
+        mw = MemoryMiddleware(memory_manager=mm)
+        agent = _make_agent(source="user")
+
+        async def _next(**_kwargs):
+            yield "done"
+
+        async def _run_turn(
+            marker: str,
+            text: str,
+            *,
+            role: str,
+            can_mutate: bool,
+        ):
+            _set_principal(
+                agent,
+                roles=[role],
+                guarded=True,
+                can_mutate=can_mutate,
+            )
+            query = _user_msg(text, msg_id=marker)
+            reply = Msg(
+                name="agent",
+                role="assistant",
+                content=[TextBlock(text=f"reply {marker}")],
+            )
+            agent.state.context.extend([query, reply])
+            async for _ in mw.on_reply(agent, {}, _next):
+                pass
+            return query, reply
+
+        config_loader = MagicMock(return_value=_guard_config())
+        with patch(
+            "qwenpaw.config.utils.load_config",
+            config_loader,
+        ), caplog.at_level(
+            "INFO",
+            logger="qwenpaw.security.mutation_guard.audit",
+        ):
+            await _run_turn(
+                "admin-a",
+                "管理员 A",
+                role="admin",
+                can_mutate=True,
+            )
+            await _run_turn(
+                "member-b",
+                "普通成员 B",
+                role="member",
+                can_mutate=False,
+            )
+            pending_after_member = list(_auto_memory_turn_state(mm)["pending"])
+            admin_c = await _run_turn(
+                "admin-c",
+                "管理员 C",
+                role="admin",
+                can_mutate=True,
+            )
+            pending_after_admin_c = list(
+                _auto_memory_turn_state(mm)["pending"],
+            )
+            admin_d = await _run_turn(
+                "admin-d",
+                "管理员 D",
+                role="admin",
+                can_mutate=True,
+            )
+
+        assert not pending_after_member
+        assert pending_after_admin_c == ["admin-c"]
+        mm.auto_memory.assert_awaited_once()
+        assert mm.auto_memory.await_args.args[0] == [*admin_c, *admin_d]
+        assert config_loader.call_count == 1
+        audits = [
+            record.getMessage()
+            for record in caplog.records
+            if "[MUTATION AUDIT]" in record.getMessage()
+        ]
+        assert len(audits) == 1
+        assert "auto_memory_denied" in audits[0]
+
+    @pytest.mark.asyncio
     async def test_member_marker_cannot_leak_into_later_admin_flush(
         self,
         caplog,
