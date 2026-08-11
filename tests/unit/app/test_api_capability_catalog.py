@@ -193,7 +193,7 @@ def test_required_non_mutating_routes_are_explicitly_cataloged():
         ("/api/console/chat", "POST"): RouteCapability.CHAT,
         ("/api/console/chat/task", "POST"): RouteCapability.CHAT,
         ("/api/console/chat/stop", "POST"): RouteCapability.CHAT,
-        ("/api/console/inbox/read", "POST"): RouteCapability.CHAT,
+        ("/api/console/inbox/read", "POST"): RouteCapability.MUTATE,
         ("/api/market/search", "POST"): RouteCapability.READ,
         (
             "/api/skills/ai/optimize/stream",
