@@ -562,6 +562,10 @@ def nocobase_console_client(monkeypatch):
 
     class ChatManager:
         @staticmethod
+        async def get_chat_by_identity(**_kwargs):
+            return None
+
+        @staticmethod
         async def get_or_create_chat(*_args, **kwargs):
             return SimpleNamespace(id="matrix-chat", name=kwargs["name"])
 

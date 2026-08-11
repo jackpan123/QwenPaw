@@ -65,6 +65,51 @@ async def test_get_chat_returns_none_for_missing(manager: ChatManager):
 
 
 @pytest.mark.asyncio
+async def test_get_chat_by_identity_returns_exact_match(manager: ChatManager):
+    expected = await manager.create_chat(
+        _make_spec(
+            session_id="console:legacy",
+            user_id="default",
+        ),
+    )
+    await manager.create_chat(
+        _make_spec(
+            session_id="console:legacy",
+            user_id="alice",
+        ),
+    )
+
+    found = await manager.get_chat_by_identity(
+        session_id="console:legacy",
+        user_id="default",
+        channel=DEFAULT_CHANNEL,
+    )
+
+    assert found is not None
+    assert found.id == expected.id
+
+
+@pytest.mark.asyncio
+async def test_get_chat_by_identity_returns_none_for_mismatch(
+    manager: ChatManager,
+):
+    await manager.create_chat(
+        _make_spec(
+            session_id="console:legacy",
+            user_id="default",
+        ),
+    )
+
+    found = await manager.get_chat_by_identity(
+        session_id="console:legacy",
+        user_id="alice",
+        channel=DEFAULT_CHANNEL,
+    )
+
+    assert found is None
+
+
+@pytest.mark.asyncio
 async def test_create_and_get_chat_round_trip(manager: ChatManager):
     spec = _make_spec(name="Hello")
 

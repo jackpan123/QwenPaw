@@ -1069,6 +1069,7 @@ QwenPaw supports optional web login authentication to protect the Console from u
    - The user enters their NocoBase username and password
    - QwenPaw forwards the credentials to NocoBase and returns the NocoBase-issued token to the browser
    - The token is stored in browser localStorage and automatically attached to all API requests
+   - When `user_id_field` is set to `username`, new authenticated Console chats use the server-verified NocoBase username as their session UserID; existing chats are not migrated automatically
 4. **Console access control** — access to the `console` channel is governed by a role→channel map (configured on the plugin's admin page): a valid, authenticated NocoBase user is **allowed by default**, and is denied only if their role is explicitly added to that role's denied channels (deny always wins over allow)
 5. **Localhost bypass** — Requests from localhost (`127.0.0.1` / `::1`) automatically skip authentication; CLI commands (`qwenpaw app`, `qwenpaw chat`, etc.) work without a token
 

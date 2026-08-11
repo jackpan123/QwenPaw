@@ -85,6 +85,9 @@ class _ConsoleChannel:
 class _ChatManager:
     calls = 0
 
+    async def get_chat_by_identity(self, **_kwargs):
+        return None
+
     async def get_or_create_chat(self, *_args, **_kwargs):
         self.calls += 1
         return SimpleNamespace(id="chat-1", name="existing-chat")
@@ -273,6 +276,9 @@ async def test_owner_mismatch_cannot_schedule_title_side_effect(
             raise RunOwnershipError("run owner mismatch")
 
     class ChatManager:
+        async def get_chat_by_identity(self, **_kwargs):
+            return None
+
         async def get_or_create_chat(self, *_args, **kwargs):
             return SimpleNamespace(id="victim-chat", name=kwargs["name"])
 
