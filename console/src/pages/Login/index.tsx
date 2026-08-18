@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { Button, Form, Input } from "antd";
@@ -7,6 +7,7 @@ import { LockOutlined, UserOutlined } from "@ant-design/icons";
 import { authApi } from "../../api/modules/auth";
 import { setAuthToken } from "../../api/config";
 import { useTheme } from "../../contexts/ThemeContext";
+import { getPostLoginHref } from "../../utils/navigationMode";
 
 export default function LoginPage() {
   const { t } = useTranslation();
@@ -15,31 +16,45 @@ export default function LoginPage() {
   const { isDark } = useTheme();
   const [loading, setLoading] = useState(false);
   const { message } = useAppMessage();
+  const rawRedirect = searchParams.get("redirect") || "/chat";
+  const redirect =
+    rawRedirect.startsWith("/") && !rawRedirect.startsWith("//")
+      ? rawRedirect
+      : "/chat";
+
+  const finishNavigation = useCallback(
+    (target: string) => {
+      const osHref = getPostLoginHref(window.location.pathname, target);
+      if (osHref) {
+        window.location.replace(osHref);
+        return;
+      }
+      navigate(target, { replace: true });
+    },
+    [navigate],
+  );
 
   useEffect(() => {
     authApi
       .getStatus()
       .then((res) => {
         if (!res.enabled) {
-          navigate("/chat", { replace: true });
+          finishNavigation(redirect);
         }
       })
       .catch(() => {});
-  }, [navigate]);
+  }, [finishNavigation, redirect]);
 
   const onFinish = async (values: { username: string; password: string }) => {
     setLoading(true);
     try {
-      const raw = searchParams.get("redirect") || "/chat";
-      const redirect =
-        raw.startsWith("/") && !raw.startsWith("//") ? raw : "/chat";
       const res = await authApi.login(values.username, values.password);
       if (res.token) {
         setAuthToken(res.token);
-        navigate(redirect, { replace: true });
+        finishNavigation(redirect);
       } else {
         message.info(t("login.authNotEnabled"));
-        navigate(redirect, { replace: true });
+        finishNavigation(redirect);
       }
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : t("login.failed");

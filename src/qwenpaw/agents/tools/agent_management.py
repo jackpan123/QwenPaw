@@ -4,7 +4,6 @@
 import asyncio
 import json
 import logging
-import math
 import re
 import time
 from typing import Any, Callable, Dict, Optional
@@ -16,8 +15,15 @@ from agentscope.tool import ToolChunk
 from agentscope.message import ToolResultState
 
 from ...config.utils import read_last_api
+from ...constant import (
+    DEFAULT_SPAWN_FOREGROUND_TIMEOUT_SECONDS,
+    DEFAULT_STREAM_TASK_TIMEOUT_SECONDS,
+)
 from ...runtime.tool_registry import tool_descriptor
 from ...utils.http import trust_env_for_url
+from ...utils.timeout import (
+    parse_positive_timeout_seconds as _parse_positive_timeout_seconds,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -319,6 +325,39 @@ def collect_final_agent_chat_response(
     return response_data
 
 
+async def collect_final_agent_chat_response_async(
+    base_url: Optional[str],
+    request_payload: Dict[str, Any],
+    to_agent: str,
+    timeout: float,
+) -> Optional[Dict[str, Any]]:
+    """Async SSE collect so coordinator cancel closes the HTTP stream.
+
+    Unlike the sync ``to_thread`` path, cancelling this coroutine exits
+    ``AsyncClient`` context managers and aborts the in-flight request.
+    """
+    normalized = _normalize_api_base_url(base_url)
+    response_data: Optional[Dict[str, Any]] = None
+    async with httpx.AsyncClient(
+        base_url=normalized,
+        timeout=httpx.Timeout(timeout),
+        trust_env=trust_env_for_url(normalized),
+    ) as client:
+        async with client.stream(
+            "POST",
+            "/console/chat",
+            json=request_payload,
+            headers=_request_headers(to_agent),
+        ) as response:
+            response.raise_for_status()
+            async for line in response.aiter_lines():
+                if line:
+                    parsed = parse_agent_sse_line(line)
+                    if parsed and parsed.get("type") != "turn_usage":
+                        response_data = parsed
+    return response_data
+
+
 def submit_agent_chat_task(
     base_url: Optional[str],
     request_payload: Dict[str, Any],
@@ -381,10 +420,15 @@ def format_background_submission_text(
     if not task_id:
         return "ERROR: No task_id returned from server"
 
-    return "\n".join(
+    lines = [
+        f"[TASK_ID: {task_id}]",
+        f"[SESSION: {session_id}]",
+    ]
+    timeout = task_result.get("timeout")
+    if timeout is not None:
+        lines.append(f"[TIMEOUT: {timeout}s]")
+    lines.extend(
         [
-            f"[TASK_ID: {task_id}]",
-            f"[SESSION: {session_id}]",
             "",
             "Task submitted successfully.",
             "The subagent is working autonomously"
@@ -393,6 +437,7 @@ def format_background_submission_text(
             f"  check_agent_task(task_id='{task_id}')",
         ],
     )
+    return "\n".join(lines)
 
 
 def format_background_status_text(
@@ -543,13 +588,39 @@ async def chat_with_agent(
         root_session_id=final_root_session,
     )
 
-    response_data = await asyncio.to_thread(
-        collect_final_agent_chat_response,
-        None,
-        request_payload,
-        normalized_to_agent,
-        timeout,
+    # Register LLM/tool timeout as kill_deadline so keep_foreground clearing
+    # the shorter hook offload window does not force-cancel early (#6245).
+    from ...tool_calls import (
+        COORDINATOR_OWNED_EXEC_TIMEOUT_SECS,
+        cancellable_wait,
+        get_call_context,
     )
+
+    # Under ToolCallContext use a large but finite HTTP ceiling so extend
+    # works, while AsyncClient cancel still closes the stream (no zombie
+    # sync thread with timeout=None).
+    http_timeout = (
+        float(COORDINATOR_OWNED_EXEC_TIMEOUT_SECS)
+        if get_call_context() is not None
+        else float(timeout)
+    )
+
+    try:
+        response_data = await cancellable_wait(
+            collect_final_agent_chat_response_async(
+                None,
+                request_payload,
+                normalized_to_agent,
+                http_timeout,
+            ),
+            fallback_secs=float(timeout),
+            as_kill_deadline=True,
+        )
+    except asyncio.CancelledError:
+        return _tool_text_response(
+            "chat_with_agent was cancelled. "
+            "Do not retry unless the user explicitly asks.",
+        )
     if not response_data:
         return _tool_text_response("(No response received)")
 
@@ -570,7 +641,7 @@ async def submit_to_agent(
     to_agent: str,
     text: str,
     session_id: Optional[str] = None,
-    task_timeout: Optional[float] = None,
+    task_timeout: float | int | str | None = None,
 ) -> ToolChunk:
     """Submit a background message to another configured agent.
 
@@ -587,9 +658,13 @@ async def submit_to_agent(
         session_id (`str`, optional):
             Existing session ID to continue a previous conversation in the
             background. If not provided, a new session ID is generated.
-        task_timeout (`float`, optional):
-            Task execution timeout in seconds. Overrides the server-side
-            default stream_task_timeout for this specific task.
+        task_timeout (`float | int | str`, optional):
+            Task execution timeout in seconds. Numeric strings (e.g.
+            ``"1800"``) are accepted for LLM mis-serialization. When
+            omitted, the backend ``POST /console/chat/task`` applies
+            ``DEFAULT_STREAM_TASK_TIMEOUT_SECONDS`` (3600). Must be a
+            positive value when provided; pass a larger explicit value for
+            long-running tasks.
 
     Returns:
         `ToolChunk`:
@@ -607,6 +682,16 @@ async def submit_to_agent(
         return _tool_text_response(
             "ERROR: 'text' is required for submission",
         )
+
+    parsed_timeout: Optional[int] = None
+    if task_timeout is not None:
+        try:
+            parsed_timeout = _parse_positive_timeout_seconds(
+                task_timeout,
+                field_name="task_timeout",
+            )
+        except ValueError as exc:
+            return _tool_text_response(f"ERROR: {exc}")
 
     target_exists = await asyncio.to_thread(
         agent_exists,
@@ -642,7 +727,7 @@ async def submit_to_agent(
         request_payload,
         normalized_to_agent,
         int(DEFAULT_AGENT_API_TIMEOUT),
-        task_timeout,
+        parsed_timeout,
     )
     return _tool_text_response(
         format_background_submission_text(result, final_session_id),
@@ -784,6 +869,8 @@ def _build_spawn_request_context(current_agent_id: str) -> dict[str, Any]:
     safe_meta = _json_safe_channel_meta(inherited.get("channel_meta") or {})
     if isinstance(safe_meta, dict) and safe_meta:
         context["channel_meta"] = safe_meta
+    if inherited.get("approval_level"):
+        context["approval_level"] = inherited["approval_level"]
     return context
 
 
@@ -873,53 +960,31 @@ def _coerce_bool(
     )
 
 
-def _coerce_timeout(
-    value: Any,
-    default: int = 600,
-    *,
-    field_name: str = "timeout",
-) -> int:
-    """Parse a timeout tool field to ``int`` seconds.
+def _foreground_wait_seconds(parsed_timeout: Optional[int]) -> int:
+    """HTTP wait for spawn foreground; omit uses the spawn-only default."""
+    if parsed_timeout is None:
+        return int(DEFAULT_SPAWN_FOREGROUND_TIMEOUT_SECONDS)
+    return parsed_timeout
 
-    Accepts ``int`` / ``float`` / numeric strings (LLM mis-serialization).
-    Rejects bools, non-numeric values, and non-positive timeouts.
+
+def _watchdog_timeout_from_submit_result(task_result: Any) -> int:
+    """Prefer the ``/chat/task`` echo; never invent a third default.
+
+    Must use :data:`DEFAULT_STREAM_TASK_TIMEOUT_SECONDS` — the same
+    symbol as ``resolve_stream_task_timeout``. Do not hardcode 3600.
     """
-    if value is None:
-        return default
-    # bool is an int subclass — do not treat True/False as 1/0 seconds.
-    if isinstance(value, bool):
-        raise ValueError(
-            f"'{field_name}' must be a positive number (seconds)",
-        )
-    if isinstance(value, (int, float)):
-        as_float = float(value)
-    elif isinstance(value, str):
-        text = value.strip()
-        if not text:
-            raise ValueError(
-                f"'{field_name}' must be a positive number (seconds)",
-            )
+    raw = None
+    if isinstance(task_result, dict):
+        raw = task_result.get("timeout")
+    if raw is not None:
         try:
-            as_float = float(text)
-        except ValueError as exc:
-            raise ValueError(
-                f"'{field_name}' must be a positive number (seconds)",
-            ) from exc
-    else:
-        raise ValueError(
-            f"'{field_name}' must be a positive number (seconds)",
-        )
-    if not math.isfinite(as_float):
-        raise ValueError(
-            f"'{field_name}' must be a positive number (seconds)",
-        )
-    # Truncation can turn (0, 1) into 0 — reject after int(), not before.
-    as_int = int(as_float)
-    if as_int <= 0:
-        raise ValueError(
-            f"'{field_name}' must be a positive number (seconds)",
-        )
-    return as_int
+            return _parse_positive_timeout_seconds(
+                raw,
+                field_name="timeout",
+            )
+        except ValueError:
+            pass
+    return int(DEFAULT_STREAM_TASK_TIMEOUT_SECONDS)
 
 
 def _normalize_batch(
@@ -927,13 +992,19 @@ def _normalize_batch(
 ) -> Optional[list[Dict[str, Any]]]:
     """Normalize ``batch`` to ``list[dict]`` or ``None``.
 
-    Accepts a real list or a JSON array string.  Structural checks
-    (non-empty, per-item ``task``) remain in :func:`_spawn_batch`.
+    Accepts a real list or a JSON array string.  Empty placeholders are
+    treated as "field not supplied" so Responses-compatible models that
+    emit ``""``, ``[]``, or ``"[]"`` can still use single-task mode.
+    This compatibility rule stays batch-specific because empty values
+    have security-relevant meanings for fields such as ``allowed_tools``.
     """
     if value is None:
         return None
+    if isinstance(value, str) and not value.strip():
+        return None
     coerced = _coerce_json_list(value, "batch")
-    assert coerced is not None
+    if not coerced:
+        return None
     return coerced  # type: ignore[return-value]
 
 
@@ -965,7 +1036,7 @@ async def spawn_subagent(  # pylint: disable=too-many-return-statements
     task: str,
     fork: bool | str | int = False,
     background: bool | str | int = False,
-    timeout: int | float | str = 600,
+    timeout: int | float | str | None = None,
     allowed_tools: Optional[list[str] | str] = None,
     skills: Optional[list[str] | str] = None,
     batch: Optional[list[Dict[str, Any]] | str] = None,
@@ -1007,10 +1078,16 @@ async def spawn_subagent(  # pylint: disable=too-many-return-statements
             a single subagent — it blocks until completion, eliminating
             the need to poll entirely.  String booleans are accepted
             like ``fork``; ambiguous values return ERROR.
-        timeout: Foreground wait timeout in seconds (default 600).
-            Ignored when ``background=True``.  Numeric strings (e.g.
-            ``"600"``) are accepted for LLM mis-serialization; invalid
-            values return ERROR.  Ignored entirely in batch mode.
+        timeout: Time budget in seconds.  Numeric strings (e.g.
+            ``"1800"``) are accepted for LLM mis-serialization; invalid
+            values return ERROR.  Foreground: parent HTTP wait on
+            ``/console/chat``; omit uses
+            ``DEFAULT_SPAWN_FOREGROUND_TIMEOUT_SECONDS`` (600).
+            Background: task execution budget on ``/console/chat/task``;
+            omit leaves the field unset so the server applies
+            ``DEFAULT_STREAM_TASK_TIMEOUT_SECONDS`` (3600).  An explicit
+            positive value applies in both modes.  Ignored entirely in
+            batch mode (use per-item ``timeout``).
         allowed_tools: Tool-name whitelist.  Only the listed tools are
             available to the subagent.  ``None`` (default) inherits the
             parent's full tool set.  An empty list denies all tools.
@@ -1073,7 +1150,12 @@ async def spawn_subagent(  # pylint: disable=too-many-return-statements
             default=False,
             field_name="background",
         )
-        timeout = _coerce_timeout(timeout, default=600, field_name="timeout")
+        parsed_timeout: Optional[int] = None
+        if timeout is not None:
+            parsed_timeout = _parse_positive_timeout_seconds(
+                timeout,
+                field_name="timeout",
+            )
     except ValueError as exc:
         return _tool_text_response(f"ERROR: {exc}")
 
@@ -1093,7 +1175,7 @@ async def spawn_subagent(  # pylint: disable=too-many-return-statements
             current_agent_id=current_agent_id,
             subagent_session_id=subagent_session_id,
             background=background,
-            timeout=timeout,
+            timeout=parsed_timeout,
             allowed_tools=allowed_tools,
             skills=skills,
         )
@@ -1121,7 +1203,7 @@ async def spawn_subagent(  # pylint: disable=too-many-return-statements
             request_payload,
             current_agent_id,
             int(DEFAULT_AGENT_API_TIMEOUT),
-            float(timeout),
+            parsed_timeout,
         )
         return _tool_text_response(
             format_background_submission_text(
@@ -1135,7 +1217,7 @@ async def spawn_subagent(  # pylint: disable=too-many-return-statements
         None,
         request_payload,
         current_agent_id,
-        timeout,
+        _foreground_wait_seconds(parsed_timeout),
     )
     if not response_data:
         return _tool_text_response(
@@ -1203,10 +1285,13 @@ async def _spawn_batch(
                         default=False,
                         field_name=f"batch[{i}].fork",
                     ),
-                    "timeout": _coerce_timeout(
-                        spec.get("timeout"),
-                        default=600,
-                        field_name=f"batch[{i}].timeout",
+                    "timeout": (
+                        None
+                        if spec.get("timeout") is None
+                        else _parse_positive_timeout_seconds(
+                            spec.get("timeout"),
+                            field_name=f"batch[{i}].timeout",
+                        )
                     ),
                 },
             )
@@ -1227,7 +1312,7 @@ async def _spawn_batch(
         session_id = _generate_subagent_session_id()
         task_text = spec["task"]
         spec_fork = bool(spec["fork"])
-        spec_timeout = int(spec["timeout"])
+        spec_timeout = spec["timeout"]
         spec_allowed = spec.get("allowed_tools")
         spec_skills = spec.get("skills")
 
@@ -1267,7 +1352,7 @@ async def _spawn_batch(
                 payload,
                 current_agent_id,
                 int(DEFAULT_AGENT_API_TIMEOUT),
-                float(spec_timeout),
+                spec_timeout,
             )
             return format_background_submission_text(result, session_id)
 
@@ -1322,7 +1407,7 @@ async def _spawn_forked_subagent(
     current_agent_id: str,
     subagent_session_id: str,
     background: bool,
-    timeout: int,
+    timeout: Optional[int],
     allowed_tools: Optional[list[str]] = None,
     skills: Optional[list[str]] = None,
 ) -> ToolChunk:
@@ -1375,9 +1460,9 @@ async def _spawn_forked_subagent(
     fork_scope_id = ""
     if worktree_path:
         # ``fork_project_dir`` is the spawn-level key; also set the ACP
-        # coding-project meta key so AgentBuilder / ContextVars rebind
+        # project-directory meta key so AgentBuilder / ContextVars rebind
         # tools/cwd to the worktree.
-        from ..acp.meta import ACP_CODING_PROJECT_META_KEY
+        from ..acp.meta import ACP_PROJECT_DIR_META_KEY
 
         workspace_dir = get_current_workspace_dir()
         registered = await asyncio.to_thread(
@@ -1396,7 +1481,7 @@ async def _spawn_forked_subagent(
         fork_scope_id = get_active_fork_scope(workspace_dir)
         fork_extra = {
             "fork_project_dir": worktree_path,
-            ACP_CODING_PROJECT_META_KEY: worktree_path,
+            ACP_PROJECT_DIR_META_KEY: worktree_path,
             "fork_worktree_branch": worktree_branch,
             "fork_scope_id": fork_scope_id,
         }
@@ -1427,8 +1512,8 @@ async def _spawn_forked_subagent(
             request_payload,
             current_agent_id,
             int(DEFAULT_AGENT_API_TIMEOUT),
-            # Align console cancel with spawn timeout / fork watchdog.
-            float(timeout),
+            # Explicit budget as-is; omit None so /chat/task applies default.
+            timeout,
         )
         task_id = result.get("task_id") if isinstance(result, dict) else None
         if worktree_path and task_id:
@@ -1447,7 +1532,7 @@ async def _spawn_forked_subagent(
                     str(task_id),
                     worktree_path,
                     worktree_branch,
-                    timeout=timeout,
+                    timeout=_watchdog_timeout_from_submit_result(result),
                     expected_scope=fork_scope_id or None,
                 ),
             )
@@ -1468,7 +1553,7 @@ async def _spawn_forked_subagent(
         None,
         request_payload,
         current_agent_id,
-        timeout,
+        _foreground_wait_seconds(timeout),
     )
 
     # Only commit on a successful worker response (avoid half-baked commits).
@@ -1526,16 +1611,20 @@ async def _watch_background_fork_finalize(
     worktree_path: str,
     worktree_branch: str,
     *,
-    timeout: int = 600,
+    timeout: int,
     expected_scope: str | None = None,
 ) -> None:
-    """Poll until the background task finishes or *timeout* elapses."""
+    """Poll until the background task finishes or *timeout* elapses.
+
+    ``timeout`` is the effective execution budget from the submit
+    response (or ``DEFAULT_STREAM_TASK_TIMEOUT_SECONDS`` if the echo is
+    missing). Console completion hook remains primary.
+    """
     from ..fork_project import (
         finalize_fork_worktree_or_fail,
         mark_fork_failed,
     )
 
-    # Align with worker timeout (default 600s); console hook remains primary.
     deadline = time.time() + max(30, int(timeout) + 30)
     delay = 2.0
     while time.time() < deadline:

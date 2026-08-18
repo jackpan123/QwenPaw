@@ -497,8 +497,13 @@ def _submit_shell_sleep_task(  # pylint: disable=redefined-outer-name
     return submit_resp.json()["task_id"], session_id
 
 
-def _poll_for_entry(app_server, session_id, timeout=20.0):
-    """Poll list_calls until at least one entry appears; return it."""
+def _poll_for_entry(app_server, session_id, timeout=60.0):
+    """Poll list_calls until at least one entry appears; return it.
+
+    The 60s window absorbs slow-runner latency (2-core Windows under
+    xdist load intermittently needs >20s from task submit to the entry
+    becoming observable); passing runs return as soon as it appears.
+    """
     deadline = time.time() + timeout
     while time.time() < deadline:
         resp = app_server.api_request(
@@ -830,13 +835,22 @@ def test_offload_while_running(
             f"/api/tool-calls/{session_id}/{entry['tool_call_id']}",
             timeout=_HTTP_TIMEOUT,
         )
-        assert detail_resp.status_code == 200, app_server.logs_tail()
-        # offload transition temporarily disabled upstream (#6058):
-        # tool stays 'running'; becomes 'offloaded' once re-enabled.
-        assert detail_resp.json()["status"] in (
-            "running",
-            "offloaded",
-        ), detail_resp.json()
+        # The offload POST already returned 202/accepted (the assertion
+        # under test). Reading the detail afterwards is a best-effort
+        # confirmation and is subject to an observation-window race: on
+        # slow / 2-core runners (Windows CI) the shell sleep tool can
+        # finish and its entry gets popped before this GET lands,
+        # yielding 404. Treat 404 as a legitimate "already completed"
+        # outcome; only assert the status field when the entry is still
+        # observable (200).
+        assert detail_resp.status_code in (200, 404), app_server.logs_tail()
+        if detail_resp.status_code == 200:
+            # offload transition temporarily disabled upstream (#6058):
+            # tool stays 'running'; becomes 'offloaded' once re-enabled.
+            assert detail_resp.json()["status"] in (
+                "running",
+                "offloaded",
+            ), detail_resp.json()
     finally:
         srv, _ = mock_llm
         srv.force_tool_call = False

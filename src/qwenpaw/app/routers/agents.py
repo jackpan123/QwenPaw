@@ -8,10 +8,10 @@ import json
 import logging
 import shutil
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 from fastapi import APIRouter, Body, HTTPException, Request
 from fastapi import Path as PathParam
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 from qwenpaw.exceptions import (
     AppBaseException,
@@ -25,6 +25,7 @@ from ...config.config import (
     ModelSlotConfig,
     load_agent_config,
     save_agent_config,
+    update_agent_config_async,
     generate_short_agent_id,
     sanitize_agent_id,
     validate_agent_id,
@@ -32,9 +33,11 @@ from ...config.config import (
 from ...config.utils import load_config, save_config
 from ...agents.utils import copy_workspace_md_files, normalize_agent_language
 from ...agents.skill_system import SkillPoolService, get_workspace_skills_dir
+from ...harnesses.registry import ProviderCatalogItem, get_provider
 from ..agent_startup import AgentStartupStatus
 from ..multi_agent_manager import MultiAgentManager
 from ...constant import WORKING_DIR
+from ...utils.io_utils import run_sync_io
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +54,13 @@ class AgentSummary(BaseModel):
     enabled: bool
     pinned: bool
     startup_status: AgentStartupStatus
+    backend: str = "qwenpaw"
+    backend_capabilities: dict[str, Any] = Field(default_factory=dict)
+    backend_model: str | None = None
+    backend_reasoning_effort: str | None = None
     active_model: ModelSlotConfig | None = None
+    managed_by_app: str | None = None
+    available_in_chat: bool = True
 
 
 class AgentListResponse(BaseModel):
@@ -60,10 +69,109 @@ class AgentListResponse(BaseModel):
     agents: list[AgentSummary]
 
 
+class MemoryGraphNode(BaseModel):
+    """One category root, indexed memory file, or unresolved target."""
+
+    id: str
+    path: str
+    name: str = ""
+    description: str = ""
+    indexed: bool
+    virtual: bool = False
+    section: Literal["daily", "digest"] | None = None
+    relative_path: str | None = None
+
+
+class MemoryGraphEdge(BaseModel):
+    """One directed wikilink in the memory graph."""
+
+    source: str
+    target: str
+    target_anchor: str | None = None
+
+
+class MemoryGraphSnapshot(BaseModel):
+    """Complete graph snapshot returned by embedded ReMe."""
+
+    version: Literal[1] = 1
+    nodes: list[MemoryGraphNode]
+    edges: list[MemoryGraphEdge]
+
+
 class ReorderAgentsRequest(BaseModel):
     """Request model for persisting agent order."""
 
     agent_ids: list[str]
+
+
+class BackendSettingsRequest(BaseModel):
+    """Provider-owned settings updated from Chat controls."""
+
+    model: str | None = None
+    reasoning_effort: str | None = None
+
+
+class ReMeComponentMemoryUsage(BaseModel):
+    """Estimated memory owned by one ReMe component."""
+
+    bytes: int
+    human: str
+
+
+class MemoryWorkerRuntimeStatus(BaseModel):
+    """Sanitized state of the background memory worker."""
+
+    status: Literal["idle", "busy", "stopping", "error"]
+    queue_pending: int
+    tasks_running: int
+
+
+class MemoryCaptureTaskStatus(BaseModel):
+    """One bounded memory-capture record, newest records returned first.
+
+    Records share the summarize queue used by periodic auto-memory and the
+    user-triggered ``/new`` and ``/compact`` commands.
+    """
+
+    task_id: str
+    status: Literal["pending", "running", "completed", "failed", "cancelled"]
+    queued_at: str | None = None
+    finished_at: str | None = None
+    message_count: int = 0
+    result: str | None = None
+    error: str | None = None
+
+
+class AutoMemoryRuntimeStatus(BaseModel):
+    """Aggregate auto-memory progress without exposing session identity."""
+
+    enabled: bool
+    interval: int
+
+
+class RecentMemoryRuntimeStatus(BaseModel):
+    """Latest bounded error summary."""
+
+    last_error: str | None = None
+
+
+class MemoryRuntimeStatus(BaseModel):
+    """Operational state surfaced to the Console."""
+
+    worker: MemoryWorkerRuntimeStatus
+    auto_memory: AutoMemoryRuntimeStatus
+    tasks: list[MemoryCaptureTaskStatus] = Field(default_factory=list)
+    recent: RecentMemoryRuntimeStatus
+    reindexing: bool
+
+
+class ReMeMemoryStatusResponse(BaseModel):
+    """Structured memory information returned by ReMe's status job."""
+
+    components: dict[str, dict[str, ReMeComponentMemoryUsage]]
+    components_total: str
+    process_rss: str
+    runtime: MemoryRuntimeStatus
 
 
 class CreateAgentRequest(BaseModel):
@@ -81,6 +189,8 @@ class CreateAgentRequest(BaseModel):
     language: str | None = None
     skill_names: list[str] | None = None
     active_model: ModelSlotConfig | None = None
+    backend: str = "qwenpaw"
+    backend_settings: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("id", mode="before")
     @classmethod
@@ -122,6 +232,22 @@ _COPYABLE_MD_FILES = (
     "HEARTBEAT.md",
     "BOOTSTRAP.md",
 )
+
+
+def _get_available_third_party_provider(
+    backend: str,
+) -> ProviderCatalogItem:
+    """Resolve an available third-party backend for API mutations."""
+    try:
+        provider = get_provider(backend)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if provider.coming_soon:
+        raise HTTPException(
+            status_code=409,
+            detail=f"{provider.name} is not available yet",
+        )
+    return provider
 
 
 def _get_multi_agent_manager(request: Request) -> MultiAgentManager:
@@ -249,6 +375,21 @@ async def list_agents(request: Request = None) -> AgentListResponse:
                     description = profile_desc
 
             active_model = agent_config.active_model
+            template_id = agent_config.template_id or ""
+            managed_by_app = (
+                template_id.removeprefix("pawapp:")
+                if template_id.startswith("pawapp:")
+                else None
+            )
+            if agent_config.backend == "qwenpaw":
+                backend_capabilities = {"workspace_ui": True}
+            else:
+                try:
+                    backend_capabilities = get_provider(
+                        agent_config.backend,
+                    ).capabilities.model_dump()
+                except ValueError:
+                    backend_capabilities = {}
 
             agents.append(
                 AgentSummary(
@@ -259,7 +400,17 @@ async def list_agents(request: Request = None) -> AgentListResponse:
                     enabled=enabled,
                     pinned=pinned,
                     startup_status=startup_status,
+                    backend=agent_config.backend,
+                    backend_capabilities=backend_capabilities,
+                    backend_model=agent_config.backend_settings.get("model"),
+                    backend_reasoning_effort=(
+                        agent_config.backend_settings.get(
+                            "reasoning_effort",
+                        )
+                    ),
                     active_model=active_model,
+                    managed_by_app=managed_by_app,
+                    available_in_chat=managed_by_app is None,
                 ),
             )
         except Exception:  # noqa: E722
@@ -371,6 +522,43 @@ async def get_agent(agentId: str = PathParam(...)) -> AgentProfileConfig:
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 
+@router.patch(
+    "/{agentId}/backend-settings",
+    response_model=AgentProfileConfig,
+    summary="Update third-party backend Chat settings",
+)
+async def update_backend_settings(
+    body: BackendSettingsRequest,
+    agentId: str = PathParam(...),
+) -> AgentProfileConfig:
+    """Persist model controls owned by a third-party agent backend."""
+    try:
+        agent_config = load_agent_config(agentId)
+    except (ValueError, AppBaseException) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if agent_config.backend == "qwenpaw":
+        raise HTTPException(
+            status_code=409,
+            detail="QwenPaw models use the native model configuration",
+        )
+    provider = _get_available_third_party_provider(agent_config.backend)
+    settings = dict(agent_config.backend_settings)
+    values = body.model_dump()
+    if provider.capabilities.model_selection:
+        if values["model"]:
+            settings["model"] = values["model"]
+        else:
+            settings.pop("model", None)
+    if provider.capabilities.reasoning_effort:
+        if values["reasoning_effort"]:
+            settings["reasoning_effort"] = values["reasoning_effort"]
+        else:
+            settings.pop("reasoning_effort", None)
+    agent_config.backend_settings = settings
+    save_agent_config(agentId, agent_config)
+    return agent_config
+
+
 def _generate_unique_id(existing_ids: set[str]) -> str:
     """Generate a unique random short agent ID.
 
@@ -405,6 +593,9 @@ async def create_agent(
     (validated for URL-safe characters, length, reserved words, and
     uniqueness).  Otherwise a random short UUID is generated.
     """
+    if request.backend != "qwenpaw":
+        _get_available_third_party_provider(request.backend)
+
     config = load_config()
     existing_ids = set(config.agents.profiles.keys())
 
@@ -436,8 +627,12 @@ async def create_agent(
         request.language or config.agents.language or "en",
     )
 
-    active_model = request.active_model
-    if not active_model or not active_model.provider_id:
+    active_model = (
+        request.active_model if request.backend == "qwenpaw" else None
+    )
+    if request.backend == "qwenpaw" and (
+        not active_model or not active_model.provider_id
+    ):
         try:
             from ...providers import ProviderManager
 
@@ -452,6 +647,8 @@ async def create_agent(
         name=request.name,
         description=request.description,
         workspace_dir=str(workspace_dir),
+        backend=request.backend,
+        backend_settings=request.backend_settings,
         language=language,
         channels=ChannelConfig(),
         mcp=MCPConfig(),
@@ -526,8 +723,7 @@ def _copy_selected_workspace_files(
         src_skills = get_workspace_skills_dir(source_workspace)
         dst_skills = get_workspace_skills_dir(workspace_dir)
         if src_skills.is_dir():
-            # Destination skills/ is created empty by
-            # _initialize_agent_workspace, so dirs_exist_ok is required.
+            # Dest may already exist when create_skills_dir scaffolding ran.
             shutil.copytree(src_skills, dst_skills, dirs_exist_ok=True)
         src_manifest = source_workspace / "skill.json"
         if src_manifest.is_file():
@@ -594,6 +790,8 @@ async def copy_agent(
         skill_names=[],
         language=language,
         apply_md_templates=request.copy_md_files,
+        create_skills_dir=request.copy_skills,
+        create_jobs_file=request.copy_jobs,
     )
     _copy_selected_workspace_files(
         request=request,
@@ -651,15 +849,33 @@ async def update_agent(
             detail=f"Agent '{agentId}' not found",
         )
 
-    existing_config = load_agent_config(agentId)
-
     update_data = agent_config.model_dump(exclude_unset=True)
-    for key, value in update_data.items():
-        if key != "id":
-            setattr(existing_config, key, value)
 
-    existing_config.id = agentId
-    save_agent_config(agentId, existing_config)
+    def apply_update(existing_config: AgentProfileConfig) -> None:
+        requested = AgentProfileConfig.model_validate(
+            {**existing_config.model_dump(), **update_data},
+        )
+        old_memory = existing_config.running.reme_light_memory_config
+        old_embedding = old_memory.embedding_model_config
+        requested_running = update_data.get("running")
+        if requested_running is not None:
+            new_memory = requested.running.reme_light_memory_config
+            new_embedding = new_memory.embedding_model_config
+            if old_embedding != new_embedding:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Embedding configuration must be updated through "
+                        "/workspace/running-config so the live ReMe runtime "
+                        "can be changed transactionally"
+                    ),
+                )
+        for key in update_data:
+            if key != "id":
+                setattr(existing_config, key, getattr(requested, key))
+        existing_config.id = agentId
+
+    await update_agent_config_async(agentId, apply_update)
     schedule_agent_reload(request, agentId)
 
     return agent_config
@@ -675,14 +891,14 @@ async def rebuild_agent_memory_index(
     request: Request = None,
 ) -> dict[str, str]:
     """Run the expensive ReMe reindex job as an explicit maintenance task."""
-    config = load_config()
+    config = await run_sync_io(load_config)
     if agentId not in config.agents.profiles:
         raise HTTPException(
             status_code=404,
             detail=f"Agent '{agentId}' not found",
         )
 
-    agent_config = load_agent_config(agentId)
+    agent_config = await run_sync_io(load_agent_config, agentId)
     if agent_config.running.memory_manager_backend != "remelight":
         raise HTTPException(
             status_code=400,
@@ -714,6 +930,183 @@ async def rebuild_agent_memory_index(
         raise HTTPException(status_code=500, detail=str(response.answer))
 
     return {"status": "completed"}
+
+
+@router.get(
+    "/{agentId}/memory/runtime-status",
+    response_model=MemoryRuntimeStatus,
+    summary="Get agent memory runtime state",
+    description="Return in-memory ReMe lifecycle state without a ReMe lease",
+)
+async def get_agent_memory_runtime_status(
+    agentId: str = PathParam(...),
+    request: Request = None,
+) -> MemoryRuntimeStatus:
+    """Return immediately even while an exclusive lifecycle job is active."""
+    config = await run_sync_io(load_config)
+    if agentId not in config.agents.profiles:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Agent '{agentId}' not found",
+        )
+
+    agent_config = await run_sync_io(load_agent_config, agentId)
+    if agent_config.running.memory_manager_backend != "remelight":
+        raise HTTPException(
+            status_code=400,
+            detail="Memory status is only supported by ReMe Light",
+        )
+
+    manager = _get_multi_agent_manager(request)
+    workspace = manager.get_loaded_agent(agentId)
+    if workspace is None or workspace.memory_manager is None:
+        raise HTTPException(status_code=503, detail="Agent is not running")
+    memory_config = agent_config.running.reme_light_memory_config
+    return MemoryRuntimeStatus.model_validate(
+        workspace.memory_manager.get_runtime_status(
+            auto_memory_interval=memory_config.auto_memory_interval,
+        ),
+    )
+
+
+@router.get(
+    "/{agentId}/memory/status",
+    response_model=ReMeMemoryStatusResponse,
+    summary="Get agent ReMe memory status",
+    description="Return ReMe component memory estimates and process RSS",
+)
+async def get_agent_memory_status(
+    agentId: str = PathParam(...),
+    request: Request = None,
+) -> ReMeMemoryStatusResponse:
+    """Inspect the currently running ReMe instance without reloading it."""
+    config = await run_sync_io(load_config)
+    if agentId not in config.agents.profiles:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Agent '{agentId}' not found",
+        )
+
+    agent_config = await run_sync_io(load_agent_config, agentId)
+    if agent_config.running.memory_manager_backend != "remelight":
+        raise HTTPException(
+            status_code=400,
+            detail="Memory status is only supported by ReMe Light",
+        )
+
+    manager = _get_multi_agent_manager(request)
+    workspace = manager.get_loaded_agent(agentId)
+    if workspace is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Agent is not running",
+        )
+    memory_manager = workspace.memory_manager
+    if memory_manager is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Memory manager is not available",
+        )
+
+    response = await memory_manager.reme_status()
+    if response is None:
+        raise HTTPException(
+            status_code=503,
+            detail="ReMe is not started or status reporting is unavailable",
+        )
+    if not response.success:
+        raise HTTPException(status_code=500, detail=str(response.answer))
+
+    metadata = getattr(response, "metadata", None) or {}
+    memory = metadata.get("status", {}).get("memory")
+    if not isinstance(memory, dict):
+        raise HTTPException(
+            status_code=500,
+            detail="ReMe returned an invalid memory status payload",
+        )
+    memory_config = agent_config.running.reme_light_memory_config
+    try:
+        return ReMeMemoryStatusResponse.model_validate(
+            {
+                **memory,
+                "runtime": memory_manager.get_runtime_status(
+                    auto_memory_interval=memory_config.auto_memory_interval,
+                ),
+            },
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="ReMe returned an invalid memory status payload",
+        ) from exc
+
+
+@router.get(
+    "/{agentId}/memory/graph",
+    response_model=MemoryGraphSnapshot,
+    summary="Get agent memory graph",
+    description="Return the category-rooted ReMe wikilink graph",
+)
+async def get_agent_memory_graph(
+    agentId: str = PathParam(...),
+    request: Request = None,
+) -> MemoryGraphSnapshot:
+    """Return a frontend-ready graph snapshot from embedded ReMe."""
+    config = await run_sync_io(load_config)
+    if agentId not in config.agents.profiles:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Agent '{agentId}' not found",
+        )
+
+    agent_config = await run_sync_io(load_agent_config, agentId)
+    if agent_config.running.memory_manager_backend != "remelight":
+        raise HTTPException(
+            status_code=400,
+            detail="Memory graph is only supported by ReMe Light",
+        )
+
+    manager = _get_multi_agent_manager(request)
+    workspace = await manager.get_agent(agentId)
+    memory_manager = workspace.memory_manager
+    if memory_manager is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Memory manager is not available",
+        )
+
+    response = await memory_manager.graph_snapshot()
+    if response is None:
+        raise HTTPException(
+            status_code=503,
+            detail="ReMe is not started or the graph snapshot job failed",
+        )
+    if not response.success:
+        raise HTTPException(status_code=500, detail=str(response.answer))
+
+    snapshot = MemoryGraphSnapshot.model_validate(response.answer)
+    reme_config = agent_config.running.reme_light_memory_config
+    roots = sorted(
+        (
+            ("daily", reme_config.daily_dir),
+            ("digest", reme_config.digest_dir),
+        ),
+        key=lambda item: len(item[1].replace("\\", "/").strip("/").split("/")),
+        reverse=True,
+    )
+    for node in snapshot.nodes:
+        if not node.indexed or node.virtual:
+            continue
+        node_path = node.path.replace("\\", "/").strip("/")
+        for section, configured_root in roots:
+            root = configured_root.replace("\\", "/").strip("/")
+            prefix = f"{root}/"
+            if root and node_path.startswith(prefix):
+                node.section = section
+                node.relative_path = node_path[len(prefix) :]
+                break
+
+    return snapshot
 
 
 @router.delete(
@@ -788,7 +1181,7 @@ async def toggle_agent_enabled(
             status_code=409,
             detail=(
                 f"Agent '{agentId}' is still starting and cannot be "
-                f"disabled yet"
+                "disabled yet"
             ),
         )
 
@@ -896,13 +1289,16 @@ def _initialize_agent_workspace(
     language: str | None = None,
     *,
     apply_md_templates: bool = True,
+    create_skills_dir: bool = True,
+    create_jobs_file: bool = True,
 ) -> None:
     """Initialize agent workspace with only explicitly requested skills."""
     from ...config import load_config as load_global_config
 
     (workspace_dir / "sessions").mkdir(exist_ok=True)
     (workspace_dir / "memory").mkdir(exist_ok=True)
-    get_workspace_skills_dir(workspace_dir).mkdir(exist_ok=True)
+    if create_skills_dir:
+        get_workspace_skills_dir(workspace_dir).mkdir(exist_ok=True)
 
     config = load_global_config()
     if not language:
@@ -917,15 +1313,16 @@ def _initialize_agent_workspace(
         _ensure_heartbeat_file(workspace_dir, language)
     _install_initial_skills(workspace_dir, skill_names)
 
-    jobs_file = workspace_dir / "jobs.json"
-    if not jobs_file.exists():
-        with open(jobs_file, "w", encoding="utf-8") as file:
-            json.dump(
-                {"version": 1, "jobs": []},
-                file,
-                ensure_ascii=False,
-                indent=2,
-            )
+    if create_jobs_file:
+        jobs_file = workspace_dir / "jobs.json"
+        if not jobs_file.exists():
+            with open(jobs_file, "w", encoding="utf-8") as file:
+                json.dump(
+                    {"version": 1, "jobs": []},
+                    file,
+                    ensure_ascii=False,
+                    indent=2,
+                )
 
     chats_file = workspace_dir / "chats.json"
     if not chats_file.exists():

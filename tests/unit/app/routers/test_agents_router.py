@@ -10,6 +10,7 @@ Covers the highest-value flows:
 - ``DELETE /agents/{id}`` — happy path with manager.stop_agent
 - ``POST /agents/{id}/copy`` — selective config copy without assets
 """
+
 # pylint: disable=protected-access,redefined-outer-name,unused-argument
 from __future__ import annotations
 
@@ -104,6 +105,7 @@ def test_list_agents_returns_all_profiles(client, fake_config):
         name="Bot",
         description="",
         workspace_dir="/tmp/ws/bot",
+        backend="codex",
     )
 
     def fake_load(agent_id):
@@ -128,6 +130,8 @@ def test_list_agents_returns_all_profiles(client, fake_config):
     body = response.json()
     assert {a["id"] for a in body["agents"]} == {"default", "bot"}
     assert {a["startup_status"] for a in body["agents"]} == {"running"}
+    backends = {a["id"]: a["backend"] for a in body["agents"]}
+    assert backends == {"default": "qwenpaw", "bot": "codex"}
 
 
 def test_list_agents_falls_back_to_id_when_load_fails(client, fake_config):
@@ -149,6 +153,43 @@ def test_list_agents_falls_back_to_id_when_load_fails(client, fake_config):
     names = {a["name"] for a in response.json()["agents"]}
     # Defaults: title-cased agent IDs.
     assert names == {"Default", "Bot"}
+
+
+def test_list_agents_preserves_unknown_backend(client, fake_config):
+    agent_cfg_default = AgentProfileConfig(
+        id="default",
+        name="Default",
+        workspace_dir="/tmp/ws/default",
+    )
+    agent_cfg_bot = AgentProfileConfig(
+        id="bot",
+        name="Configured Bot",
+        workspace_dir="/tmp/ws/bot",
+        backend="missing",
+    )
+
+    with (
+        patch(
+            "qwenpaw.app.routers.agents.load_config",
+            return_value=fake_config,
+        ),
+        patch(
+            "qwenpaw.app.routers.agents.load_agent_config",
+            side_effect=lambda agent_id: {
+                "default": agent_cfg_default,
+                "bot": agent_cfg_bot,
+            }[agent_id],
+        ),
+    ):
+        response = client.get("/api/agents")
+
+    assert response.status_code == 200
+    bot = next(
+        item for item in response.json()["agents"] if item["id"] == "bot"
+    )
+    assert bot["name"] == "Configured Bot"
+    assert bot["backend"] == "missing"
+    assert bot["backend_capabilities"] == {}
 
 
 # ---------------------------------------------------------------------------
@@ -174,6 +215,41 @@ def test_get_agent_returns_config(client):
     assert response.json()["id"] == "bot"
 
 
+def test_update_backend_settings_from_chat(client):
+    cfg = AgentProfileConfig(
+        id="bot",
+        name="Bot",
+        workspace_dir="/tmp/ws/bot",
+        backend="codex",
+        backend_settings={"unrelated": True},
+    )
+
+    with (
+        patch(
+            "qwenpaw.app.routers.agents.load_agent_config",
+            return_value=cfg,
+        ),
+        patch(
+            "qwenpaw.app.routers.agents.save_agent_config",
+        ) as save,
+    ):
+        response = client.patch(
+            "/api/agents/bot/backend-settings",
+            json={
+                "model": "gpt-test-codex",
+                "reasoning_effort": "high",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["backend_settings"] == {
+        "unrelated": True,
+        "model": "gpt-test-codex",
+        "reasoning_effort": "high",
+    }
+    save.assert_called_once()
+
+
 def test_get_agent_returns_404_for_missing(client):
     with patch(
         "qwenpaw.app.routers.agents.load_agent_config",
@@ -196,6 +272,28 @@ def test_get_agent_returns_404_for_app_base_exception(client):
         response = client.get("/api/agents/ghost")
 
     assert response.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# POST /agents
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("backend", "expected_status"),
+    [("missing", 400), ("claude", 409)],
+)
+def test_create_agent_rejects_unavailable_backend(
+    client,
+    backend,
+    expected_status,
+):
+    response = client.post(
+        "/api/agents",
+        json={"name": "Invalid Agent", "backend": backend},
+    )
+
+    assert response.status_code == expected_status
 
 
 # ---------------------------------------------------------------------------
@@ -260,6 +358,340 @@ def test_rebuild_memory_index_rejects_concurrent_run(
         response = client.post("/api/agents/bot/memory/reindex")
 
     assert response.status_code == 409
+
+
+# ---------------------------------------------------------------------------
+# GET /agents/{id}/memory/status
+# ---------------------------------------------------------------------------
+
+
+def test_get_memory_runtime_status_does_not_run_a_reme_job(
+    client,
+    fake_config,
+    manager_mock,
+):
+    agent_config = AgentProfileConfig(id="bot", name="Bot")
+    runtime_status = {
+        "worker": {
+            "status": "busy",
+            "queue_pending": 0,
+            "tasks_running": 0,
+        },
+        "auto_memory": {
+            "enabled": False,
+            "interval": 0,
+        },
+        "tasks": [],
+        "recent": {
+            "last_error": None,
+        },
+        "reindexing": True,
+    }
+    memory_manager = MagicMock()
+    memory_manager.get_runtime_status.return_value = runtime_status
+    memory_manager.reme_status = AsyncMock()
+    manager_mock.get_loaded_agent.return_value = MagicMock(
+        memory_manager=memory_manager,
+    )
+
+    with (
+        patch(
+            "qwenpaw.app.routers.agents.load_config",
+            return_value=fake_config,
+        ),
+        patch(
+            "qwenpaw.app.routers.agents.load_agent_config",
+            return_value=agent_config,
+        ),
+    ):
+        response = client.get("/api/agents/bot/memory/runtime-status")
+
+    assert response.status_code == 200
+    assert response.json() == runtime_status
+    memory_manager.reme_status.assert_not_awaited()
+
+
+def test_get_memory_status_returns_structured_reme_metrics(
+    client,
+    fake_config,
+    manager_mock,
+):
+    agent_config = AgentProfileConfig(id="bot", name="Bot")
+    status_response = MagicMock(
+        success=True,
+        metadata={
+            "status": {
+                "memory": {
+                    "components": {
+                        "file_store": {
+                            "default": {"bytes": 2048, "human": "2.00 KiB"},
+                        },
+                    },
+                    "components_total": "2.00 KiB",
+                    "process_rss": "80.00 MiB",
+                },
+            },
+        },
+    )
+    memory_manager = MagicMock()
+    memory_manager.reme_status = AsyncMock(return_value=status_response)
+    runtime_status = {
+        "worker": {
+            "status": "busy",
+            "queue_pending": 2,
+            "tasks_running": 1,
+        },
+        "auto_memory": {
+            "enabled": True,
+            "interval": 5,
+        },
+        "tasks": [],
+        "recent": {
+            "last_error": None,
+        },
+        "reindexing": False,
+    }
+    memory_manager.get_runtime_status.return_value = runtime_status
+    manager_mock.get_loaded_agent.return_value = MagicMock(
+        memory_manager=memory_manager,
+    )
+
+    with (
+        patch(
+            "qwenpaw.app.routers.agents.load_config",
+            return_value=fake_config,
+        ),
+        patch(
+            "qwenpaw.app.routers.agents.load_agent_config",
+            return_value=agent_config,
+        ),
+    ):
+        response = client.get("/api/agents/bot/memory/status")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        **status_response.metadata["status"]["memory"],
+        "runtime": runtime_status,
+    }
+    memory_manager.reme_status.assert_awaited_once_with()
+    memory_manager.get_runtime_status.assert_called_once_with(
+        auto_memory_interval=5,
+    )
+
+
+def test_get_memory_status_rejects_invalid_payload(
+    client,
+    fake_config,
+    manager_mock,
+):
+    agent_config = AgentProfileConfig(id="bot", name="Bot")
+    memory_manager = MagicMock()
+    memory_manager.reme_status = AsyncMock(
+        return_value=MagicMock(success=True, metadata={}),
+    )
+    manager_mock.get_loaded_agent.return_value = MagicMock(
+        memory_manager=memory_manager,
+    )
+
+    with (
+        patch(
+            "qwenpaw.app.routers.agents.load_config",
+            return_value=fake_config,
+        ),
+        patch(
+            "qwenpaw.app.routers.agents.load_agent_config",
+            return_value=agent_config,
+        ),
+    ):
+        response = client.get("/api/agents/bot/memory/status")
+
+    assert response.status_code == 500
+    assert response.json()["detail"] == (
+        "ReMe returned an invalid memory status payload"
+    )
+
+
+def test_get_memory_status_does_not_start_an_unloaded_agent(
+    client,
+    fake_config,
+    manager_mock,
+):
+    agent_config = AgentProfileConfig(id="bot", name="Bot")
+    manager_mock.get_loaded_agent.return_value = None
+    manager_mock.get_agent = AsyncMock()
+
+    with (
+        patch(
+            "qwenpaw.app.routers.agents.load_config",
+            return_value=fake_config,
+        ),
+        patch(
+            "qwenpaw.app.routers.agents.load_agent_config",
+            return_value=agent_config,
+        ),
+    ):
+        response = client.get("/api/agents/bot/memory/status")
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Agent is not running"
+    manager_mock.get_loaded_agent.assert_called_once_with("bot")
+    manager_mock.get_agent.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# GET /agents/{id}/memory/graph
+# ---------------------------------------------------------------------------
+
+
+def test_get_memory_graph_returns_reme_snapshot(
+    client,
+    fake_config,
+    manager_mock,
+):
+    agent_config = AgentProfileConfig(id="bot", name="Bot")
+    graph_response = MagicMock(
+        success=True,
+        answer={
+            "version": 1,
+            "nodes": [
+                {
+                    "id": "memory/a.md",
+                    "path": "memory/a.md",
+                    "name": "Alpha",
+                    "description": "Root note",
+                    "indexed": True,
+                },
+                {"id": "missing.md", "path": "missing.md", "indexed": False},
+            ],
+            "edges": [
+                {
+                    "source": "memory/a.md",
+                    "target": "missing.md",
+                    "target_anchor": "details",
+                },
+            ],
+        },
+    )
+    memory_manager = MagicMock()
+    memory_manager.graph_snapshot = AsyncMock(return_value=graph_response)
+    manager_mock.get_agent = AsyncMock(
+        return_value=MagicMock(memory_manager=memory_manager),
+    )
+
+    with (
+        patch(
+            "qwenpaw.app.routers.agents.load_config",
+            return_value=fake_config,
+        ),
+        patch(
+            "qwenpaw.app.routers.agents.load_agent_config",
+            return_value=agent_config,
+        ),
+    ):
+        response = client.get("/api/agents/bot/memory/graph")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        **graph_response.answer,
+        "nodes": [
+            {
+                **graph_response.answer["nodes"][0],
+                "virtual": False,
+                "section": "daily",
+                "relative_path": "a.md",
+            },
+            {
+                **graph_response.answer["nodes"][1],
+                "name": "",
+                "description": "",
+                "virtual": False,
+                "section": None,
+                "relative_path": None,
+            },
+        ],
+    }
+    memory_manager.graph_snapshot.assert_awaited_once_with()
+
+
+def test_get_memory_graph_maps_nested_memory_roots(
+    client,
+    fake_config,
+    manager_mock,
+):
+    agent_config = AgentProfileConfig(id="bot", name="Bot")
+    reme_config = agent_config.running.reme_light_memory_config
+    reme_config.daily_dir = "notes/daily"
+    reme_config.digest_dir = "notes/digest"
+    graph_response = MagicMock(
+        success=True,
+        answer={
+            "version": 1,
+            "nodes": [
+                {
+                    "id": "notes/daily/a.md",
+                    "path": "notes/daily/a.md",
+                    "indexed": True,
+                },
+                {
+                    "id": "notes/digest/wiki/topic.md",
+                    "path": "notes/digest/wiki/topic.md",
+                    "indexed": True,
+                },
+            ],
+            "edges": [],
+        },
+    )
+    memory_manager = MagicMock()
+    memory_manager.graph_snapshot = AsyncMock(return_value=graph_response)
+    manager_mock.get_agent = AsyncMock(
+        return_value=MagicMock(memory_manager=memory_manager),
+    )
+
+    with (
+        patch(
+            "qwenpaw.app.routers.agents.load_config",
+            return_value=fake_config,
+        ),
+        patch(
+            "qwenpaw.app.routers.agents.load_agent_config",
+            return_value=agent_config,
+        ),
+    ):
+        response = client.get("/api/agents/bot/memory/graph")
+
+    assert response.status_code == 200
+    nodes = response.json()["nodes"]
+    assert [(node["section"], node["relative_path"]) for node in nodes] == [
+        ("daily", "a.md"),
+        ("digest", "wiki/topic.md"),
+    ]
+
+
+def test_get_memory_graph_reports_unavailable_reme(
+    client,
+    fake_config,
+    manager_mock,
+):
+    agent_config = AgentProfileConfig(id="bot", name="Bot")
+    memory_manager = MagicMock()
+    memory_manager.graph_snapshot = AsyncMock(return_value=None)
+    manager_mock.get_agent = AsyncMock(
+        return_value=MagicMock(memory_manager=memory_manager),
+    )
+
+    with (
+        patch(
+            "qwenpaw.app.routers.agents.load_config",
+            return_value=fake_config,
+        ),
+        patch(
+            "qwenpaw.app.routers.agents.load_agent_config",
+            return_value=agent_config,
+        ),
+    ):
+        response = client.get("/api/agents/bot/memory/graph")
+
+    assert response.status_code == 503
 
 
 # ---------------------------------------------------------------------------
@@ -581,6 +1013,8 @@ def test_copy_agent_defaults_reset_channels_and_schedules_startup(
 
     init_mock.assert_called_once()
     assert init_mock.call_args.kwargs["apply_md_templates"] is True
+    assert init_mock.call_args.kwargs["create_skills_dir"] is False
+    assert init_mock.call_args.kwargs["create_jobs_file"] is False
     manager_mock.schedule_agent_startup.assert_called_once_with("copied1")
     assert "copied1" in fake_config.agents.profiles
 
@@ -650,6 +1084,8 @@ def test_copy_agent_copies_skills_and_jobs_when_requested(
     assert not (new_ws / "chats.json").exists()
     init_mock.assert_called_once()
     assert init_mock.call_args.kwargs["apply_md_templates"] is False
+    assert init_mock.call_args.kwargs["create_skills_dir"] is True
+    assert init_mock.call_args.kwargs["create_jobs_file"] is True
     manager_mock.schedule_agent_startup.assert_called_once_with("copied2")
 
 
@@ -787,3 +1223,91 @@ def test_initialize_agent_workspace_applies_md_templates_by_default(
     assert (workspace / "HEARTBEAT.md").is_file()
     assert (workspace / "sessions").is_dir()
     assert (workspace / "jobs.json").is_file()
+
+
+@pytest.mark.parametrize(
+    ("copy_skills", "copy_jobs", "agent_id"),
+    [
+        (False, False, "copied4"),
+        (True, True, "copied5"),
+    ],
+)
+def test_copy_agent_optional_assets_match_request_flags(
+    client,
+    fake_config,
+    manager_mock,
+    tmp_path,
+    monkeypatch,
+    copy_skills,
+    copy_jobs,
+    agent_id,
+):
+    source_ws = tmp_path / "source"
+    _seed_source_workspace(source_ws)
+    fake_config.agents.profiles["bot"].workspace_dir = str(source_ws)
+    fake_config.agents.language = "en"
+
+    source_cfg = AgentProfileConfig(
+        id="bot",
+        name="Bot",
+        workspace_dir=str(source_ws),
+        language="en",
+    )
+
+    working_dir = tmp_path / "working"
+    working_dir.mkdir()
+    monkeypatch.setattr(
+        "qwenpaw.app.routers.agents.WORKING_DIR",
+        working_dir,
+    )
+
+    with (
+        patch(
+            "qwenpaw.app.routers.agents.load_config",
+            return_value=fake_config,
+        ),
+        patch(
+            "qwenpaw.config.load_config",
+            return_value=fake_config,
+        ),
+        patch(
+            "qwenpaw.app.routers.agents.load_agent_config",
+            return_value=source_cfg,
+        ),
+        patch("qwenpaw.app.routers.agents.save_config"),
+        patch("qwenpaw.app.routers.agents.save_agent_config"),
+        patch(
+            "qwenpaw.app.routers.agents._generate_unique_id",
+            return_value=agent_id,
+        ),
+    ):
+        response = client.post(
+            "/api/agents/bot/copy",
+            json={
+                "copy_skills": copy_skills,
+                "copy_jobs": copy_jobs,
+            },
+        )
+
+    assert response.status_code == 201
+    new_ws = Path(response.json()["workspace_dir"])
+    assert (new_ws / "sessions").is_dir()
+    assert (new_ws / "memory").is_dir()
+    assert (new_ws / "chats.json").is_file()
+    assert "from-source" in (new_ws / "AGENTS.md").read_text(
+        encoding="utf-8",
+    )
+
+    if copy_skills:
+        assert (new_ws / "skills" / "demo" / "SKILL.md").is_file()
+        assert (new_ws / "skill.json").is_file()
+    else:
+        assert not (new_ws / "skills").exists()
+        assert not (new_ws / "skill.json").exists()
+
+    if copy_jobs:
+        assert '"j1"' in (new_ws / "jobs.json").read_text(encoding="utf-8")
+    else:
+        assert not (new_ws / "jobs.json").exists()
+
+    manager_mock.schedule_agent_startup.assert_called_once_with(agent_id)

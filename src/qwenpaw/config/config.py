@@ -7,8 +7,19 @@ import logging
 import re
 import threading
 from pathlib import Path
-from typing import Optional, Union, Dict, List, Literal, Any, Set
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    List,
+    Literal,
+    Optional,
+    Set,
+    Tuple,
+    Union,
+)
 
+from apscheduler.triggers.cron import CronTrigger
 from pydantic import (
     BaseModel,
     Field,
@@ -279,7 +290,18 @@ class FeishuConfig(BaseChannelConfig):
     encrypt_key: str = ""
     verification_token: str = ""
     media_dir: Optional[str] = None
-    domain: Literal["feishu", "lark"] = "feishu"
+    # "feishu" / "lark", or a full http(s) base URL for custom gateways.
+    domain: str = "feishu"
+
+    @field_validator("domain")
+    @classmethod
+    def _check_domain(cls, v: str) -> str:
+        if v in ("feishu", "lark") or v.startswith(("http://", "https://")):
+            return v
+        raise ValueError(
+            "domain must be 'feishu', 'lark', or an http(s) base URL",
+        )
+
     streaming_enabled: bool = False
     share_session_in_group: bool = False
 
@@ -293,12 +315,21 @@ class QQConfig(BaseChannelConfig):
 
 
 class OneBotConfig(BaseChannelConfig):
-    """OneBot v11 channel: reverse WebSocket for NapCat/go-cqhttp/Lagrange."""
+    """OneBot v11 channel: reverse WebSocket for NapCat/go-cqhttp/Lagrange.
 
-    ws_host: str = "0.0.0.0"
+    ``ws_host`` defaults to loopback so the reverse WebSocket server is
+    not reachable from the network without an explicit opt-in.  Binding
+    to a non-loopback address requires ``access_token`` to be set.
+    """
+
+    ws_host: str = "127.0.0.1"
     ws_port: int = 6199
     access_token: str = ""
     share_session_in_group: bool = False
+    media_dir: Optional[str] = None
+    media_base64: bool = False
+    media_base64_max_mb: int = Field(default=10, gt=0)
+    media_download_max_mb: int = Field(default=50, gt=0)
 
 
 class TelegramConfig(BaseChannelConfig):
@@ -348,6 +379,7 @@ class WecomConfig(BaseChannelConfig):
 
     bot_id: str = ""
     secret: str = ""
+    ws_url: str = ""
     media_dir: Optional[str] = None
     welcome_text: str = ""
     # If True (default), all group members share one chat; set to
@@ -437,6 +469,8 @@ class XiaoYiConfig(BaseChannelConfig):
     ak: str = ""  # Access Key
     sk: str = ""  # Secret Key
     agent_id: str = ""  # Agent ID from XiaoYi platform
+    # Custom WS gateway (empty = official endpoints); disables backup.
+    ws_url: str = ""
     task_timeout_ms: int = 3600000  # 1 hour task timeout
 
 
@@ -450,6 +484,8 @@ class YuanbaoConfig(BaseChannelConfig):
     app_id: str = ""
     app_secret: str = ""
     api_domain: str = "bot.yuanbao.tencent.com"
+    # Custom WebSocket gateway (empty = official wss endpoint).
+    ws_url: str = ""
     media_dir: Optional[str] = None
     accept_bot_messages: bool = False
 
@@ -606,12 +642,21 @@ class AutoMemorySearchConfig(BaseModel):
     )
 
 
+EmbeddingBackend = Literal[
+    "openai",
+    "dashscope",
+    "dashscope_multimodal",
+    "gemini",
+    "ollama",
+]
+
+
 class EmbeddingModelConfig(BaseModel):
     """Embedding model configuration."""
 
     model_config = ConfigDict(extra="ignore")
 
-    backend: str = Field(
+    backend: EmbeddingBackend = Field(
         default="openai",
         description="Embedding backend (openai, etc.)",
     )
@@ -621,7 +666,11 @@ class EmbeddingModelConfig(BaseModel):
     )
     base_url: str = Field(default="", description="Base URL for embedding API")
     model_name: str = Field(default="", description="Embedding model name")
-    dimensions: int = Field(default=1024, description="Embedding dimensions")
+    dimensions: int = Field(
+        default=1024,
+        ge=1,
+        description="Embedding dimensions",
+    )
     enable_cache: bool = Field(
         default=True,
         description="Whether to enable embedding cache",
@@ -632,15 +681,59 @@ class EmbeddingModelConfig(BaseModel):
     )
     max_cache_size: int = Field(
         default=10000,
+        ge=1,
         description="Maximum cache size",
     )
     max_input_length: int = Field(
         default=8192,
+        ge=1,
         description="Maximum input length for embedding",
     )
     max_batch_size: int = Field(
         default=10,
+        ge=1,
         description="Maximum batch size for embedding",
+    )
+
+
+class RerankerConfig(BaseModel):
+    """Reranker model configuration for post-search reordering."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = Field(
+        default=False,
+        description=(
+            "Whether to enable reranker for memory search reordering"
+        ),
+    )
+    api_key: str = Field(
+        default="",
+        description="API key for reranker provider",
+    )
+    base_url: str = Field(
+        default="",
+        description=(
+            "Base URL for reranker API (SiliconFlow: "
+            "https://api.siliconflow.cn/v1)"
+        ),
+    )
+    model_name: str = Field(
+        default="",
+        description="Reranker model name (e.g. BAAI/bge-reranker-v2-m3)",
+    )
+    candidate_multiplier: int = Field(
+        default=3,
+        ge=1,
+        description=(
+            "Over-fetch multiplier: search N x multiplier candidates, "
+            "rerank, then return top-N"
+        ),
+    )
+    timeout: float = Field(
+        default=10.0,
+        ge=1.0,
+        description="Reranker API timeout in seconds",
     )
 
 
@@ -698,17 +791,22 @@ class ReMeLightMemoryConfig(BaseModel):
         default="digest",
         description="Subdirectory for digest memory",
     )
-    summarize_when_compact: bool = Field(
-        default=True,
-        description="Whether to enable memory summarization during compaction",
+    inbox_push_enabled: bool | None = Field(
+        default=None,
+        exclude=True,
+        description="Deprecated shared inbox notification switch",
     )
-
-    inbox_push_enabled: bool = Field(
+    auto_memory_inbox_push_enabled: bool = Field(
         default=True,
-        description=(
-            "Whether to push ReMe auto-memory, auto-dream, and "
-            "auto-resource job results to the inbox"
-        ),
+        description="Whether to push auto-memory results to the inbox",
+    )
+    auto_dream_inbox_push_enabled: bool = Field(
+        default=True,
+        description="Whether to push auto-dream results to the inbox",
+    )
+    daily_paper_inbox_push_enabled: bool = Field(
+        default=True,
+        description="Whether to push Daily Paper results to the inbox",
     )
 
     auto_memory_interval: int | None = Field(
@@ -736,6 +834,29 @@ class ReMeLightMemoryConfig(BaseModel):
         ),
     )
 
+    daily_paper_cron_enabled: bool = Field(
+        default=False,
+        description="Whether to enable the scheduled Daily Paper job",
+    )
+
+    daily_paper_cron: str = Field(
+        default="0 9 * * *",
+        description=(
+            "Cron expression for Daily Paper generation "
+            "(use daily_paper_cron_enabled to enable/disable)"
+        ),
+    )
+
+    daily_paper_use_hf_mirror: bool = Field(
+        default=False,
+        description="Whether Daily Paper uses the Hugging Face mirror",
+    )
+
+    daily_paper_topics: str = Field(
+        default="",
+        description="Topics to prioritize when selecting Daily Paper papers",
+    )
+
     auto_memory_search_config: AutoMemorySearchConfig = Field(
         default_factory=AutoMemorySearchConfig,
     )
@@ -743,6 +864,53 @@ class ReMeLightMemoryConfig(BaseModel):
     embedding_model_config: EmbeddingModelConfig = Field(
         default_factory=EmbeddingModelConfig,
     )
+
+    reranker_config: RerankerConfig = Field(
+        default_factory=RerankerConfig,
+    )
+
+    needs_reindex: bool = Field(
+        default=False,
+        description=(
+            "Whether the memory index must be rebuilt after an embedding "
+            "vector-space change"
+        ),
+    )
+
+    memory_search_enabled: bool = Field(
+        default=True,
+        description="Whether to expose the memory_search tool to the agent",
+    )
+
+    @field_validator("dream_cron", "daily_paper_cron")
+    @classmethod
+    def validate_service_cron(cls, value: str) -> str:
+        """Reject expressions that the runtime scheduler cannot install."""
+        if not value.strip():
+            # Preserve compatibility with legacy configs that used an empty
+            # dream cron to disable scheduling before the explicit switches.
+            return value
+        try:
+            CronTrigger.from_crontab(value)
+        except ValueError as exc:
+            raise ValueError(f"Invalid cron expression: {value!r}") from exc
+        return value
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_shared_inbox_switch(cls, values: Any) -> Any:
+        """Use the legacy shared switch for notification fields not yet set."""
+        if not isinstance(values, dict) or "inbox_push_enabled" not in values:
+            return values
+        migrated = dict(values)
+        legacy_value = bool(values["inbox_push_enabled"])
+        for field_name in (
+            "auto_memory_inbox_push_enabled",
+            "auto_dream_inbox_push_enabled",
+            "daily_paper_inbox_push_enabled",
+        ):
+            migrated.setdefault(field_name, legacy_value)
+        return migrated
 
 
 class ContextCompactConfig(BaseModel):
@@ -925,6 +1093,24 @@ class ScrollContextConfig(BaseModel):
     )
 
 
+class VisualCompactConfig(BaseModel):
+    """User-facing visual compact settings."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = Field(
+        default=False,
+        description="Enable request-time text-to-image compression.",
+    )
+    effort: Literal["low", "medium", "high"] = Field(
+        default="low",
+        description=(
+            "Visual compression intensity. Higher effort places more eligible "
+            "context in each image while preserving the same safety policy."
+        ),
+    )
+
+
 class LightContextConfig(BaseModel):
     """Light context manager configuration."""
 
@@ -962,6 +1148,9 @@ class LightContextConfig(BaseModel):
     )
     scroll_config: ScrollContextConfig = Field(
         default_factory=ScrollContextConfig,
+    )
+    visual_compact_config: VisualCompactConfig = Field(
+        default_factory=VisualCompactConfig,
     )
 
     @model_validator(mode="after")
@@ -1636,15 +1825,6 @@ class CodingModeConfig(BaseModel):
         default=False,
         description="Enable Coding Mode IDE layout and tools",
     )
-    project_dir: Optional[str] = Field(
-        default=None,
-        description=(
-            "Active coding project directory (absolute path). "
-            "When set, Coding Mode file / git operations use this path "
-            "instead of the agent workspace_dir. "
-            "None means use the default workspace_dir."
-        ),
-    )
 
 
 class AgentProfileConfig(BaseModel):
@@ -1659,6 +1839,21 @@ class AgentProfileConfig(BaseModel):
     workspace_dir: str = Field(
         default="",
         description="Path to agent's workspace (optional, for reference)",
+    )
+    project_dir: Optional[str] = Field(
+        default=None,
+        description=(
+            "Default project directory for tools and project files. "
+            "None means use workspace_dir."
+        ),
+    )
+    backend: str = Field(
+        default="qwenpaw",
+        description="Runtime backend used for every agent request",
+    )
+    backend_settings: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Configuration validated and consumed by the backend",
     )
     template_id: Optional[str] = Field(
         default=None,
@@ -1973,14 +2168,19 @@ class BuiltinToolConfig(BaseModel):
 
 
 _BUILTIN_TOOLS_CACHE: Dict[str, BuiltinToolConfig] | None = None
-_BUILTIN_TOOLS_LOCK = threading.Lock()
+_BUILTIN_TOOLS_LOCK = threading.RLock()
+
+
+def _invalidate_builtin_tools_cache() -> None:
+    """Clear cached descriptors after a conditional tool import."""
+    global _BUILTIN_TOOLS_CACHE
+    with _BUILTIN_TOOLS_LOCK:
+        _BUILTIN_TOOLS_CACHE = None
 
 
 def _reset_builtin_tools_cache_for_tests() -> None:
     """Clear cached BuiltinToolConfig map (test helper only)."""
-    global _BUILTIN_TOOLS_CACHE
-    with _BUILTIN_TOOLS_LOCK:
-        _BUILTIN_TOOLS_CACHE = None
+    _invalidate_builtin_tools_cache()
 
 
 def _copy_builtin_tools(
@@ -2129,6 +2329,17 @@ class ToolsConfig(BaseModel):
         icon value.
         """
         defaults = _default_builtin_tools()
+        # Keep persisted configurations from the former stable-track name
+        # compatible with the unified browser identity.
+        legacy = self.builtin_tools.pop("browser_use", None)
+        if legacy is not None:
+            unified = self.builtin_tools.get("browser")
+            if unified is not None:
+                unified.enabled = legacy.enabled
+            elif "browser" in defaults:
+                self.builtin_tools["browser"] = defaults["browser"].model_copy(
+                    update={"enabled": legacy.enabled},
+                )
         for name, tc in defaults.items():
             if name not in self.builtin_tools:
                 self.builtin_tools[name] = tc
@@ -2350,6 +2561,122 @@ class SecurityConfig(BaseModel):
         return cleaned
 
 
+class BrowserConfig(BaseModel):
+    """Operator-facing browser backend and launch configuration."""
+
+    experimental: bool = Field(
+        default=True,
+        description=(
+            "Enable the unified browser beta. It currently uses subprocess "
+            "isolation; OS sandboxing is planned. Set false to use the "
+            "deprecated stable browser_use escape hatch."
+        ),
+    )
+    backend: Literal[
+        "auto",
+        "launch",
+        "managed_cdp",
+        "connect_cdp",
+    ] = "auto"
+    identity: Literal["auto", "user", "avatar", "guest"] = Field(
+        default="auto",
+        description=(
+            "Whose identity the browser acts as: 'user' drives your real "
+            "Chrome; 'avatar' uses a persistent alt profile; 'guest' uses "
+            "an incognito visitor. 'auto' picks user when Chrome is "
+            "connected, guest otherwise."
+        ),
+    )
+    cdp_url: Optional[str] = None
+    cdp_port: int = 0
+    engine: Literal["auto", "chromium"] = "auto"
+    channel: Optional[str] = None
+    executable_path: Optional[str] = None
+    headless: Literal["auto", "true", "false"] = "auto"
+    context: Literal["auto", "profile", "incognito"] = "auto"
+    user_data_dir: Optional[str] = None
+    args: List[str] = Field(default_factory=list)
+    viewport: Optional[Tuple[int, int]] = None
+    proxy: Optional[str] = None
+    use_system_default: bool = True
+    idle_ttl_seconds: float = 600.0
+    session_idle_ttl_seconds: float = 900.0
+    exec_timeout_seconds: float = 120.0
+
+    @field_validator(
+        "idle_ttl_seconds",
+        "session_idle_ttl_seconds",
+        "exec_timeout_seconds",
+    )
+    @classmethod
+    def _require_positive_seconds(cls, value: float) -> float:
+        if value <= 0:
+            raise ValueError("must be a positive number of seconds")
+        return value
+
+    @field_validator("engine", mode="before")
+    @classmethod
+    def _migrate_unsupported_engine(cls, value: Any) -> Any:
+        if value in {"webkit", "firefox"}:
+            logger.warning(
+                "browser.engine %r is not supported by the unified browser; "
+                "falling back to auto",
+                value,
+            )
+            return "auto"
+        return value
+
+    @model_validator(mode="after")
+    def _require_cdp_url_for_connection(self) -> "BrowserConfig":
+        if self.backend == "connect_cdp" and not self.cdp_url:
+            raise ValueError("backend='connect_cdp' requires browser.cdp_url")
+        return self
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_deprecated_identity_knobs(cls, values: Any) -> Any:
+        """Rewrite legacy identity knobs before backend literal validation."""
+        if not isinstance(values, dict):
+            return values
+        migrated = dict(values)
+        if migrated.get("backend") == "extension":
+            logger.warning(
+                "browser.backend='extension' is deprecated; "
+                "use browser.identity='user'",
+            )
+            if migrated.get("identity", "auto") == "auto":
+                migrated["identity"] = "user"
+            migrated["backend"] = "auto"
+        if (
+            migrated.get("context", "auto") != "auto"
+            and migrated.get("identity", "auto") == "auto"
+        ):
+            logger.warning(
+                "browser.context is deprecated; use browser.identity",
+            )
+            migrated["identity"] = (
+                "avatar" if migrated.get("context") == "profile" else "guest"
+            )
+        return migrated
+
+    @field_validator("cdp_port")
+    @classmethod
+    def _require_valid_port(cls, value: int) -> int:
+        if not 0 <= value <= 65535:
+            raise ValueError("must be within 0-65535")
+        return value
+
+    @field_validator("viewport")
+    @classmethod
+    def _require_positive_viewport(
+        cls,
+        value: Optional[Tuple[int, int]],
+    ) -> Optional[Tuple[int, int]]:
+        if value is not None and (value[0] <= 0 or value[1] <= 0):
+            raise ValueError("both dimensions must be positive integers")
+        return value
+
+
 class Config(BaseModel):
     """Root config (config.json)."""
 
@@ -2361,6 +2688,7 @@ class Config(BaseModel):
     last_dispatch: Optional[LastDispatchConfig] = None
     security: SecurityConfig = Field(default_factory=SecurityConfig)
     acp: ACPConfig = Field(default_factory=ACPConfig)
+    browser: BrowserConfig = Field(default_factory=BrowserConfig)
     show_tool_details: bool = True
     user_timezone: str = Field(
         default_factory=detect_system_timezone,
@@ -2397,7 +2725,9 @@ ChannelConfigUnion = Union[
     SlackConfig,
     WecomConfig,
     XiaoYiConfig,
+    YuanbaoConfig,
     WeChatConfig,
+    OneBotConfig,
 ]
 
 
@@ -2549,6 +2879,24 @@ def migrate_channel_display_fields(channels: object) -> bool:
     return migrated
 
 
+def migrate_project_directory_config(data: object) -> bool:
+    """Move the legacy Coding Mode directory into the Agent root once."""
+    if not isinstance(data, dict):
+        return False
+    coding_mode = data.get("coding_mode")
+    if not isinstance(coding_mode, dict) or "project_dir" not in coding_mode:
+        return False
+    legacy_project_dir = coding_mode.pop("project_dir")
+    if "project_dir" in data:
+        return True
+    if isinstance(legacy_project_dir, str):
+        stripped = legacy_project_dir.strip()
+        data["project_dir"] = stripped or None
+    else:
+        data["project_dir"] = None
+    return True
+
+
 def load_agent_config(  # pylint: disable=too-many-branches,too-many-statements
     agent_id: str,
 ) -> AgentProfileConfig:
@@ -2564,7 +2912,7 @@ def load_agent_config(  # pylint: disable=too-many-branches,too-many-statements
         AgentProfileConfig: Complete agent configuration
 
     Raises:
-        ValueError: If agent ID not found in root config
+        ConfigurationException: If agent ID not found in root config
     """
     from .utils import (
         load_config,
@@ -2606,8 +2954,28 @@ def load_agent_config(  # pylint: disable=too-many-branches,too-many-statements
                 return cached_config
 
         # Need to reload config from disk
-        with open(agent_config_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
+        try:
+            with open(agent_config_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except UnicodeDecodeError as e:
+            raise ConfigurationException(
+                config_key="agent",
+                message=(
+                    f"Agent '{agent_id}' configuration file is corrupted "
+                    f"(invalid UTF-8 encoding). Path: {agent_config_path}. "
+                    f"Please repair or delete it. Error: {e}"
+                ),
+            ) from e
+        except json.JSONDecodeError as e:
+            raise ConfigurationException(
+                config_key="agent",
+                message=(
+                    f"Agent '{agent_id}' configuration file contains "
+                    f"invalid JSON. Path: {agent_config_path}. Error: {e}"
+                ),
+            ) from e
+
+        project_dir_migrated = migrate_project_directory_config(data)
 
         # Match the existing migration behavior: migrate this workspace only
         # when its agent configuration is loaded.
@@ -2628,15 +2996,23 @@ def load_agent_config(  # pylint: disable=too-many-branches,too-many-statements
             display_migrated = False
             access_control_migrated = False
 
-        if weixin_migrated or display_migrated or access_control_migrated:
+        if (
+            project_dir_migrated
+            or weixin_migrated
+            or display_migrated
+            or access_control_migrated
+        ):
             try:
-                if weixin_migrated or display_migrated:
+                if project_dir_migrated or weixin_migrated or display_migrated:
                     import uuid as _uuid
                     import shutil as _shutil
 
-                    migration_name = (
-                        "channel-display" if display_migrated else "weixin"
-                    )
+                    if project_dir_migrated:
+                        migration_name = "project-dir"
+                    elif display_migrated:
+                        migration_name = "channel-display"
+                    else:
+                        migration_name = "weixin"
                     backup_path = agent_config_path.with_suffix(
                         f".{_uuid.uuid4().hex[:8]}."
                         f"{migration_name}-migrate.bak",
@@ -2719,6 +3095,37 @@ def save_agent_config(
             agent_config.model_dump(exclude_none=True),
         )
         _agent_config_cache.pop(agent_id, None)
+
+
+async def load_agent_config_async(agent_id: str) -> AgentProfileConfig:
+    """Load an agent configuration without blocking the event loop."""
+    from ..utils.io_utils import run_sync_io
+
+    return await run_sync_io(load_agent_config, agent_id)
+
+
+async def update_agent_config_async(
+    agent_id: str,
+    updater: Callable[[AgentProfileConfig], Any],
+) -> AgentProfileConfig:
+    """Atomically read, mutate, and durably save one agent configuration.
+
+    The complete legacy transaction runs in a worker thread while holding the
+    same re-entrant lock used by synchronous readers and writers. This avoids
+    blocking the event loop without introducing an await boundary between the
+    read and write phases.
+    """
+    from ..utils.io_utils import run_sync_io
+    from .utils import _agent_config_lock
+
+    def update_sync() -> AgentProfileConfig:
+        with _agent_config_lock:
+            agent_config = load_agent_config(agent_id).model_copy(deep=True)
+            updater(agent_config)
+            save_agent_config(agent_id, agent_config)
+            return agent_config
+
+    return await run_sync_io(update_sync)
 
 
 def migrate_legacy_config_to_multi_agent() -> bool:
