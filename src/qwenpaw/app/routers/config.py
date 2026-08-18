@@ -15,74 +15,66 @@ from fastapi import (
 )
 from pydantic import BaseModel, Field
 
-from ..utils import schedule_agent_reload
-from ...config import (
-    Config,
-    load_config,
-    update_config_transaction,
-    ChannelConfig,
-    ChannelConfigUnion,
-    get_available_channels,
-    ToolGuardConfig,
-    ToolGuardRuleConfig,
-)
-from ..channels.registry import BUILTIN_CHANNEL_KEYS
-from ...config.timezone import normalize_tz
-from ...config.config import (
-    AgentsLLMRoutingConfig,
-    ConsoleConfig,
-    DingTalkConfig,
-    DiscordConfig,
-    FeishuConfig,
-    HeartbeatConfig,
-    IMessageChannelConfig,
-    MatrixConfig,
-    MattermostConfig,
-    MutationGuardConfig,
-    MQTTConfig,
-    QQConfig,
-    SIPChannelConfig,
-    SkillScannerConfig,
-    SkillScannerWhitelistEntry,
-    TelegramConfig,
-    VoiceChannelConfig,
-    WecomConfig,
-)
-from ...agents.acp.core import ACPConfig, ACPAgentConfig
+from ...agents.acp.core import ACPAgentConfig, ACPConfig
 from ...agents.acp.node_runtime import (
     ACPNodeRuntimeStatus,
     get_node_runtime_status,
     resolve_node_runtime,
 )
-
-from .schemas_config import (
-    ChannelHealthResponse,
-    ChannelRestartResponse,
-    HeartbeatBody,
+from ...config import (
+    ChannelConfig,
+    ChannelConfigUnion,
+    Config,
+    ToolGuardConfig,
+    ToolGuardRuleConfig,
+    get_available_channels,
+    load_config,
+    save_config,
+    update_config_transaction,
+)
+from ...config.config import (
+    AgentsLLMRoutingConfig,
+    HeartbeatConfig,
+    MutationGuardConfig,
+    SkillScannerConfig,
+    SkillScannerWhitelistEntry,
+)
+from ...config.timezone import normalize_tz
+from ..channels.conflict import (
+    get_channel_bot_identity,
+    get_channel_config,
 )
 from ..channels.qrcode_auth_handler import (
     QRCODE_AUTH_HANDLERS,
     generate_qrcode_image,
 )
+from ..channels.registry import BUILTIN_CHANNEL_KEYS
+from ..utils import schedule_agent_reload
+from .schemas_config import (
+    ChannelConflictAgent,
+    ChannelConflictResponse,
+    ChannelHealthResponse,
+    ChannelRestartResponse,
+    HeartbeatBody,
+)
 
 router = APIRouter(prefix="/config", tags=["config"])
 
 
-_CHANNEL_CONFIG_CLASS_MAP = {
-    "telegram": TelegramConfig,
-    "dingtalk": DingTalkConfig,
-    "discord": DiscordConfig,
-    "feishu": FeishuConfig,
-    "qq": QQConfig,
-    "imessage": IMessageChannelConfig,
-    "console": ConsoleConfig,
-    "voice": VoiceChannelConfig,
-    "sip": SIPChannelConfig,
-    "mattermost": MattermostConfig,
-    "mqtt": MQTTConfig,
-    "matrix": MatrixConfig,
-    "wecom": WecomConfig,
-}
+def _channel_config_class(name: str) -> Optional[type[BaseModel]]:
+    """Config model for a built-in channel, None for plugin channels.
+
+    Built-in channel shapes are declared once as ``ChannelConfig``
+    fields, so deriving them here cannot drift when a channel is added
+    later. This is the same source of truth doctor already walks.
+    """
+    field = ChannelConfig.model_fields.get(name)
+    annotation = field.annotation if field is not None else None
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        return annotation
+    return None
+
+
 _ALLOWED_ACP_TOOL_PARSE_MODES = {
     "call_title",
     "update_detail",
@@ -186,8 +178,8 @@ async def put_channels(
     ),
 ) -> ChannelConfig:
     """Update all channel configs."""
-    from ..agent_context import get_agent_for_request
     from ...config.config import save_agent_config
+    from ..agent_context import get_agent_for_request
 
     agent = await get_agent_for_request(request)
     agent.config.channels = channels_config
@@ -264,7 +256,7 @@ async def get_channel_health(
     response_model=ChannelRestartResponse,
     summary="Restart a channel",
     description=(
-        "Stop and re-start a specific channel" " without restarting the agent"
+        "Stop and re-start a specific channel without restarting the agent"
     ),
 )
 async def restart_channel(
@@ -291,7 +283,7 @@ async def restart_channel(
     except Exception as exc:
         raise HTTPException(
             status_code=500,
-            detail=(f"Failed to restart channel" f" '{channel_name}': {exc}"),
+            detail=(f"Failed to restart channel '{channel_name}': {exc}"),
         ) from exc
 
 
@@ -385,6 +377,90 @@ async def get_channel(
     return single_channel_config
 
 
+@router.post(
+    "/channels/{channel_name}/conflict-check",
+    response_model=ChannelConflictResponse,
+    summary="Check channel Bot conflicts",
+    description="Check whether another running agent uses the same Bot",
+)
+async def check_channel_conflict(
+    request: Request,
+    channel_name: str = Path(
+        ...,
+        description="Name of the channel to check",
+        min_length=1,
+    ),
+    single_channel_config: dict = Body(
+        ...,
+        description="Proposed channel configuration",
+    ),
+) -> ChannelConflictResponse:
+    """Check a proposed config against channels in running agents."""
+    from ..agent_context import get_agent_for_request
+
+    available = get_available_channels()
+    if channel_name not in available:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Channel '{channel_name}' not found",
+        )
+
+    if not single_channel_config.get("enabled", False):
+        return ChannelConflictResponse(conflict=False)
+
+    proposed_identity = get_channel_bot_identity(
+        channel_name,
+        single_channel_config,
+    )
+    if proposed_identity is None:
+        return ChannelConflictResponse(conflict=False)
+
+    current_agent = await get_agent_for_request(request)
+    current_agent_id = current_agent.agent_id
+    manager = request.app.state.multi_agent_manager
+    conflicts = []
+
+    for agent_id, workspace in list(manager.agents.items()):
+        workspace_agent_id = getattr(workspace, "agent_id", agent_id)
+        if current_agent_id in (agent_id, workspace_agent_id):
+            continue
+
+        channel_manager = getattr(workspace, "channel_manager", None)
+        running_channels = getattr(channel_manager, "channels", ())
+        if not any(
+            getattr(channel, "channel", None) == channel_name
+            for channel in running_channels
+        ):
+            continue
+
+        other_config = get_channel_config(
+            getattr(workspace.config, "channels", None),
+            channel_name,
+        )
+        if (
+            get_channel_bot_identity(
+                channel_name,
+                other_config,
+            )
+            != proposed_identity
+        ):
+            continue
+
+        agent_name = getattr(workspace.config, "name", "") or agent_id
+        conflicts.append(
+            ChannelConflictAgent(
+                agent_id=agent_id,
+                agent_name=str(agent_name),
+            ),
+        )
+
+    conflicts.sort(key=lambda item: item.agent_id)
+    return ChannelConflictResponse(
+        conflict=bool(conflicts),
+        agents=conflicts,
+    )
+
+
 @router.put(
     "/channels/{channel_name}",
     response_model=ChannelConfigUnion,
@@ -404,8 +480,8 @@ async def put_channel(
     ),
 ) -> ChannelConfigUnion:
     """Update a specific channel config by name."""
-    from ..agent_context import get_agent_for_request
     from ...config.config import save_agent_config
+    from ..agent_context import get_agent_for_request
 
     available = get_available_channels()
     if channel_name not in available:
@@ -420,7 +496,7 @@ async def put_channel(
     if agent.config.channels is None:
         agent.config.channels = ChannelConfig()
 
-    config_class = _CHANNEL_CONFIG_CLASS_MAP.get(channel_name)
+    config_class = _channel_config_class(channel_name)
     if config_class is not None:
         channel_config = config_class(**single_channel_config)
     else:
@@ -465,8 +541,8 @@ async def put_acp_config(
     ),
 ) -> ACPConfig:
     """Update ACP config for the current agent."""
-    from ..agent_context import get_agent_for_request
     from ...config.config import save_agent_config
+    from ..agent_context import get_agent_for_request
 
     agent = await get_agent_for_request(request)
     agent.config.acp = acp_config
@@ -566,8 +642,8 @@ async def put_acp_agent_config(
     ),
 ) -> ACPAgentConfig:
     """Update config for one ACP agent."""
-    from ..agent_context import get_agent_for_request
     from ...config.config import save_agent_config
+    from ..agent_context import get_agent_for_request
 
     if acp_agent_config.tool_parse_mode not in _ALLOWED_ACP_TOOL_PARSE_MODES:
         raise HTTPException(
@@ -602,8 +678,8 @@ async def put_acp_agent_config(
 )
 async def get_heartbeat(request: Request) -> Any:
     """Return effective heartbeat config (from file or default)."""
-    from ..agent_context import get_agent_for_request
     from ...config.config import HeartbeatConfig as HeartbeatConfigModel
+    from ..agent_context import get_agent_for_request
 
     agent = await get_agent_for_request(request)
     hb = agent.config.heartbeat
@@ -623,8 +699,8 @@ async def put_heartbeat(
     body: HeartbeatBody = Body(..., description="Heartbeat configuration"),
 ) -> Any:
     """Update heartbeat config and reschedule the heartbeat job."""
-    from ..agent_context import get_agent_for_request
     from ...config.config import save_agent_config
+    from ..agent_context import get_agent_for_request
 
     agent = await get_agent_for_request(request)
     hb = HeartbeatConfig(
@@ -661,9 +737,10 @@ async def put_heartbeat(
 )
 async def run_heartbeat_now(request: Request) -> Any:
     """Trigger one heartbeat run in background for quick testing."""
+    import logging
+
     from ..agent_context import get_agent_for_request
     from ..crons.heartbeat import run_heartbeat_once
-    import logging
 
     workspace = await get_agent_for_request(request)
 
@@ -891,12 +968,6 @@ async def _sandbox_effective_status(
     if not enabled:
         return False, None
 
-    # Check platform-level permissions
-    from ...utils.platform import is_windows_admin
-
-    if not is_windows_admin():
-        return False, "not_admin"
-
     # Check if sandbox backend is actually available on this platform.
     # probe_sandbox_support() is lru_cache'd; the first call may block
     # (subprocess.run on Linux), so we offload it to a thread.
@@ -905,6 +976,14 @@ async def _sandbox_effective_status(
     capability = await asyncio.to_thread(probe_sandbox_support)
     if not capability.supported:
         return False, "unsupported"
+
+    # Check platform-level permissions — on Windows, an unelevated
+    # sandbox is available but offers weaker isolation than the
+    # elevated (admin) sandbox.
+    from ...utils.platform import is_windows_admin
+
+    if not is_windows_admin():
+        return True, "unelevated"
 
     return True, None
 
@@ -945,27 +1024,11 @@ async def put_sandbox_setting(
     body: SandboxSettingBody = Body(...),
 ) -> SandboxStatusResponse:
     def update(config: Config) -> None:
+        # Idempotent: an unchanged value leaves the transaction untouched so
+        # no write happens. Upstream dropped the Windows admin 403 — enabling
+        # now saves and surfaces effective=False/reason="unelevated" instead.
         if body.enabled == config.security.sandbox_enabled:
             return
-
-        # Compare and authorize under the same transaction so the idempotent
-        # decision cannot become stale while another writer is committing.
-        from ...utils.platform import is_windows_admin
-
-        if body.enabled and not is_windows_admin():
-            raise HTTPException(
-                status_code=403,
-                detail=(
-                    "Sandbox requires administrator privileges on Windows."
-                    "\n\nTo enable the sandbox, restart QwenPaw with "
-                    "administrator privileges:\n"
-                    "  - Desktop: right-click the shortcut "
-                    "\u2192 Run as administrator\n"
-                    "  - CLI: open an elevated terminal, then run "
-                    "`qwenpaw app`\nThen come back to Settings and "
-                    "re-enable the sandbox."
-                ),
-            )
         config.security.sandbox_enabled = body.enabled
 
     update_config_transaction(update)

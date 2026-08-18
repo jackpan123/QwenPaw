@@ -220,3 +220,31 @@ describe("filterRoutesForAuthorization", () => {
     ).toEqual(["read"]);
   });
 });
+
+describe("routeRegistry.removeBySource", () => {
+  it("removes base, replacement and wrapper registrations", () => {
+    routeRegistry.add("plugin", {
+      id: "plugin-page",
+      path: "/plugin",
+      component: PluginPage,
+    });
+    routeRegistry.add("core", { id: "core-page", path: "/", component: Base });
+    routeRegistry.replace("plugin", "core-page", PluginPage);
+    routeRegistry.wrap("plugin", "core-page", (Inner) => () => (
+      <div data-testid="wrap">
+        <Inner />
+      </div>
+    ));
+
+    routeRegistry.removeBySource("plugin");
+
+    expect(routeRegistry.snapshot().map((route) => route.id)).toEqual([
+      "core-page",
+    ]);
+    const Component = routeRegistry.snapshot()[0].Component;
+    const { queryByTestId } = render(<Component />);
+    expect(queryByTestId("base")).toBeInTheDocument();
+    expect(queryByTestId("plugin")).not.toBeInTheDocument();
+    expect(queryByTestId("wrap")).not.toBeInTheDocument();
+  });
+});

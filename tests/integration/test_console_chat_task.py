@@ -158,8 +158,8 @@ def test_chat_task_submit_registers_chat_and_completes(
         assert submit_resp.status_code == 200, app_server.logs_tail()
         task_id = submit_resp.json()["task_id"]
         assert task_id.startswith("task-"), task_id
-        # Full UUID4 hex keeps 128 bits of entropy in this opaque id.
-        assert len(task_id) == len("task-") + 32, task_id
+        # Upstream shortened this opaque id to 12 hex chars.
+        assert len(task_id) == len("task-") + 12, task_id
 
         chats_resp = app_server.api_request(
             "GET",

@@ -25,7 +25,6 @@ function SecurityPage() {
     setEnabled,
     sandboxEnabled,
     setSandboxEnabled,
-    sandboxEffective,
     sandboxReason,
     toolOptions,
     saving,
@@ -110,7 +109,6 @@ function SecurityPage() {
                   setEnabled={setEnabled}
                   sandboxEnabled={sandboxEnabled}
                   setSandboxEnabled={setSandboxEnabled}
-                  sandboxEffective={sandboxEffective}
                   sandboxReason={sandboxReason}
                   toolOptions={toolOptions}
                   mergedRules={mergedRules}

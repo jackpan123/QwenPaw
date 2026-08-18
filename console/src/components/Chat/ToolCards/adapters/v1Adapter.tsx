@@ -101,7 +101,6 @@ function parseV1Props(v1Props: Record<string, unknown>): {
   const inputProgress =
     isInputStreaming && typeof rawArgs === "string"
       ? {
-          characterCount: rawArgs.length,
           preview: rawArgs.slice(-STREAM_INPUT_PREVIEW_CHARS),
           truncated: rawArgs.length > STREAM_INPUT_PREVIEW_CHARS,
         }
@@ -123,8 +122,12 @@ function parseV1Props(v1Props: Record<string, unknown>): {
   // Message-level status on *_call messages reflects delivery, not execution.
   const status = deriveToolStatus(resultItem, data);
 
-  // Extract id
+  // Extract id — prefer call_id which carries the ToolCallBlock.id
+  // (e.g. "toolu_…" / "call_…") from the AgentScope SSE stream.
+  // It is set in the backend at FunctionCall.call_id
+  // (see agentscope/message.py → FunctionCall dataclass).
   const toolId =
+    (callData.call_id as string) ||
     (callData.id as string) ||
     (data.id as string) ||
     `v1-${toolName}-${Date.now()}`;

@@ -43,8 +43,8 @@ _EXPECTED: dict[str, ActionEffect] = {
     "list_agents": ActionEffect.READ,
     "check_agent_task": ActionEffect.READ,
     "run_tool_batch": ActionEffect.READ,
-    # browser_use default is EXTERNAL_SIDE_EFFECT (per-action selector below).
-    "browser_use": ActionEffect.EXTERNAL_SIDE_EFFECT,
+    # The unified browser runs arbitrary SDK code — no read-only subset.
+    "browser": ActionEffect.EXTERNAL_SIDE_EFFECT,
 }
 
 
@@ -81,70 +81,25 @@ def test_no_extra_builtins_left_unclassified() -> None:
     assert not extra, f"uncatalogued builtins: {sorted(extra)}"
 
 
-def test_browser_use_snapshot_resolves_read() -> None:
-    """browser_use action=snapshot is READ via the selector."""
-    d = _by_name()["browser_use"]._tool_descriptor
-    assert d.effect.resolve({"action": "snapshot"}) is ActionEffect.READ
+def test_browser_defaults_to_external_side_effect() -> None:
+    """The unified browser tool has no read-only path.
 
-
-def test_browser_use_click_resolves_external_side_effect() -> None:
-    """browser_use action=click stays EXTERNAL_SIDE_EFFECT (not in
-    read_only_values)."""
-    d = _by_name()["browser_use"]._tool_descriptor
-    assert (
-        d.effect.resolve({"action": "click"})
-        is ActionEffect.EXTERNAL_SIDE_EFFECT
-    )
-
-
-def test_browser_use_read_only_actions_whitelist() -> None:
-    """The documented read-only browser actions all resolve to READ."""
-    d = _by_name()["browser_use"]._tool_descriptor
-    read_only = (
-        "start",
-        "stop",
-        "open",
-        "navigate",
-        "snapshot",
-        "screenshot",
-        "console_messages",
-        "network_requests",
-        "tabs",
-        "wait_for",
-        "list_cdp_targets",
-    )
-    for action in read_only:
+    Unlike the deprecated action-enum tool, ``browser(code=...)`` executes
+    arbitrary Browser SDK code, so no argument can be inspected to prove a
+    call is read-only. Every invocation must resolve to EXTERNAL_SIDE_EFFECT
+    so read-only members cannot drive the browser.
+    """
+    d = _by_name()["browser"]._tool_descriptor
+    assert d.effect.default is ActionEffect.EXTERNAL_SIDE_EFFECT
+    for kwargs in (
+        {},
+        {"code": "await page.goto('https://example.com')"},
+        {"code": "await page.screenshot()"},
+        {"action": "snapshot"},
+    ):
         assert (
-            d.effect.resolve({"action": action}) is ActionEffect.READ
-        ), action
-
-
-def test_browser_use_mutating_actions_stay_external() -> None:
-    """click/type/evaluate/upload/download/select/run_code/cache actions
-    stay EXTERNAL_SIDE_EFFECT (must NOT be added to read_only_values)."""
-    d = _by_name()["browser_use"]._tool_descriptor
-    mutating = (
-        "click",
-        "type",
-        "evaluate",
-        "upload",
-        "download",
-        "form",
-        "drag",
-        "select",
-        "run_code",
-        "cache",
-    )
-    for action in mutating:
-        assert (
-            d.effect.resolve({"action": action})
-            is ActionEffect.EXTERNAL_SIDE_EFFECT
-        ), action
-
-
-# ---------------------------------------------------------------------------
-# Scroll + goal tools (direct ToolDescriptor, NOT auto-collected builtins)
-# ---------------------------------------------------------------------------
+            d.effect.resolve(kwargs) is ActionEffect.EXTERNAL_SIDE_EFFECT
+        ), kwargs
 
 
 def test_recall_history_is_read() -> None:

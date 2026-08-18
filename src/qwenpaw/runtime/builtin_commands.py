@@ -15,7 +15,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ._state_utils import StateProxy
-from .slash_command_registry import CommandSpec, FallbackHandler
+from .slash_command_registry import (
+    CommandEffectResolver,
+    CommandSpec,
+    FallbackHandler,
+)
 from ..security.mutation_guard import ActionEffect
 
 if TYPE_CHECKING:
@@ -42,6 +46,7 @@ _DAEMON_EFFECTS: dict[str, ActionEffect] = {
 # invocation by ``_resolve_approval_effect`` below.
 _CONTROL_EFFECTS: dict[str, ActionEffect] = {
     "approval": ActionEffect.MUTATE,
+    "checkpoint": ActionEffect.MUTATE,
     "approve": ActionEffect.MUTATE,
     "deny": ActionEffect.MUTATE,
     "model": ActionEffect.MUTATE,
@@ -209,6 +214,27 @@ def _collect_daemon_specs() -> list[CommandSpec]:
 # ======================================================================
 
 
+def _resolve_checkpoint_effect(args: str) -> ActionEffect:
+    """Classify one compound ``/checkpoint`` invocation.
+
+    Only the inspection paths are read-only. The ``restore`` and ``gc``
+    preview modes are deliberately treated as mutating: whether they apply
+    depends on flag parsing (``--confirm``), and the guard must not hinge
+    on that parse.
+    """
+    stripped = args.strip()
+    if not stripped:
+        return ActionEffect.READ
+    parts = stripped.split()
+    action = parts[0].casefold()
+    if action == "timeline":
+        return ActionEffect.READ
+    if action == "auto":
+        # Bare ``/checkpoint auto`` reports state; ``on``/``off`` changes it.
+        return ActionEffect.READ if len(parts) == 1 else ActionEffect.MUTATE
+    return ActionEffect.MUTATE
+
+
 def _resolve_approval_effect(args: str) -> ActionEffect:
     """Classify one compound ``/approval`` invocation."""
     stripped = args.strip()
@@ -218,6 +244,13 @@ def _resolve_approval_effect(args: str) -> ActionEffect:
     if action in {"approve", "deny", "cancel"}:
         return ActionEffect.MUTATE
     return ActionEffect.UNKNOWN
+
+
+# Compound control commands whose effect depends on their arguments.
+_CONTROL_EFFECT_RESOLVERS: dict[str, CommandEffectResolver] = {
+    "approval": _resolve_approval_effect,
+    "checkpoint": _resolve_checkpoint_effect,
+}
 
 
 def _make_control_adapter(
@@ -304,9 +337,7 @@ def _make_control_adapter(
             command_name,
             ActionEffect.UNKNOWN,
         ),
-        effect_resolver=(
-            _resolve_approval_effect if command_name == "approval" else None
-        ),
+        effect_resolver=_CONTROL_EFFECT_RESOLVERS.get(command_name),
     )
 
 
@@ -581,6 +612,48 @@ def _collect_conversation_specs() -> list[CommandSpec]:
 # ======================================================================
 
 
+def _extract_block_text(block: Any) -> str:
+    """Return the text of a message content block (dict or object)."""
+    if isinstance(block, dict):
+        return block.get("text") or ""
+    return getattr(block, "text", "") or ""
+
+
+def _build_skill_injection(
+    original_text: str,
+    display_name: str,
+    description: str,
+    skill_dir: "Path",
+    skill_body: str,
+) -> str:
+    """Keep the typed command at the head; append the skill body in a
+    trailing ``<skill>`` block (hidden from display by
+    ``strip_injected_skill_block``).
+
+    The block uses a nested-element schema — ``<name>``/``<description>``/
+    ``<dir>``/``<content>`` — rather than XML attributes, so frontmatter
+    values (name, dir) need no attribute quoting/escaping. The typed
+    command stays at the head, so the user's request is not duplicated
+    inside the block.
+    """
+    return (
+        f"{original_text}\n\n"
+        f"<skill>\n"
+        f"<name>{display_name}</name>\n"
+        f"<description>{description}</description>\n"
+        f"<dir>{skill_dir}</dir>\n"
+        f"<content>\n"
+        f"This skill has already been loaded because the user invoked "
+        f"it directly above. Do not call the Skill tool to read it "
+        f"again. Follow the skill instructions to fulfill the user's "
+        f"request above. Relative paths inside the skill (e.g. "
+        f"`scripts/`) resolve against the directory above.\n\n"
+        f"{skill_body.strip()}\n"
+        f"</content>\n"
+        f"</skill>"
+    )
+
+
 def _parse_skill_query(query: str) -> tuple[str, str] | None:
     """Parse ``/name [input]`` or ``/[name with spaces] [input]``."""
     stripped = query.strip()
@@ -668,9 +741,10 @@ async def _skill_fallback_handler(
     raw = read_text_file_with_encoding_fallback(skill_md)
     post = fm.loads(raw)
     display_name = post.get("name") or skill_name
+    description = post.get("description") or ""
 
     if not user_input:
-        desc = post.get("description") or "No description."
+        desc = description or "No description."
         return Msg(
             name="assistant",
             role="assistant",
@@ -688,13 +762,7 @@ async def _skill_fallback_handler(
             ],
         )
 
-    # Rewrite last message with skill body — agent will execute with it
-    merged = (
-        f"Use the [{display_name}] skill in "
-        f"`{skill_dir}` to fulfill "
-        f"user's task: {user_input}\n\n"
-        f"{post.content}"
-    )
+    # Append the skill body as a trailing <skill> block; typed text stays.
     msgs = getattr(ctx, "input_msgs", None)
     if msgs:
         last = msgs[-1]
@@ -707,11 +775,31 @@ async def _skill_fallback_handler(
                     else getattr(block, "type", None)
                 )
                 if btype == "text":
+                    merged = _build_skill_injection(
+                        _extract_block_text(block),
+                        display_name,
+                        description,
+                        skill_dir,
+                        post.content,
+                    )
                     content[i] = TextBlock(type="text", text=merged)
                     return None
+            merged = _build_skill_injection(
+                "",
+                display_name,
+                description,
+                skill_dir,
+                post.content,
+            )
             content.insert(0, TextBlock(type="text", text=merged))
         elif isinstance(content, str):
-            last.content = merged
+            last.content = _build_skill_injection(
+                content,
+                display_name,
+                description,
+                skill_dir,
+                post.content,
+            )
     return None
 
 

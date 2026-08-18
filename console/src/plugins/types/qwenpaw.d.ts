@@ -221,6 +221,29 @@ export interface QwenPawChatNamespace {
     toolName: string,
     render: React.FC<Record<string, unknown>>,
   ): Disposable;
+  approval: {
+    render(
+      pluginId: string,
+      sourceType: string,
+      render: React.FC<{
+        approval: {
+          requestId: string;
+          sessionId: string;
+          rootSessionId?: string;
+          agentId: string;
+          toolName: string;
+          severity: string;
+          findingsCount: number;
+          findingsSummary: string;
+          toolParams: Record<string, unknown>;
+          createdAt: number;
+          timeoutSeconds: number;
+          sourceType: string;
+        };
+        onResolved: () => void;
+      }>,
+    ): Disposable;
+  };
   card(
     pluginId: string,
     cardName: string,
@@ -275,6 +298,9 @@ export interface QwenPawWindowNamespace {
   chat: QwenPawChatNamespace;
   audit: QwenPawAuditNamespace;
   modules: Record<string, Record<string, unknown>>;
+  paw?: {
+    forApp(appId: string): import("../pawapp-sdk/types").PawSdk;
+  };
   registerRoutes?(pluginId: string, routes: PluginRouteDeclaration[]): void;
   registerToolRender?(
     pluginId: string,

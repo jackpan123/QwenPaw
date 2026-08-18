@@ -15,11 +15,17 @@ from .context.scroll.continuation_summary import (
     ContinuationSummary,
     redact_secrets,
 )
+from .middlewares import (
+    discard_auto_memory_turns,
+    manual_compact_memory_by_handler,
+    reset_auto_memory_turn_state,
+)
 from .utils.context_stats import format_history_str
 from ..config.config import load_agent_config, get_model_max_input_length
 from ..constant import DEBUG_HISTORY_FILE, MAX_LOAD_HISTORY_COUNT
 from ..exceptions import SystemCommandException
 from ..loop.gates.runner import clear_pending_gate_state
+from ..utils.io_utils import run_sync_io
 
 if TYPE_CHECKING:
     from agentscope.agent import Agent
@@ -320,7 +326,7 @@ class CommandHandler(ConversationCommandHandlerMixin):
             return None
         return HintBlock(hint=safe_hint, source="user")
 
-    async def _process_compact(
+    async def _process_compact(  # pylint: disable=too-many-statements
         self,
         messages: list[Msg],
         args: str = "",
@@ -378,7 +384,9 @@ class CommandHandler(ConversationCommandHandlerMixin):
             # native, so under the scroll strategy we drive the scroll manager
             # directly here. Native sessions fall through untouched.
             scroll_mgr = (
-                self._build_standalone_scroll_manager()
+                await run_sync_io(
+                    self._build_standalone_scroll_manager,
+                )
                 if self._agent is None
                 else None
             )
@@ -397,10 +405,11 @@ class CommandHandler(ConversationCommandHandlerMixin):
                 finally:
                     scroll_mgr.close()
             else:
-                await agent.compress_context(
-                    forced_cfg,
-                    instructions=instructions,
-                )
+                with manual_compact_memory_by_handler():
+                    await agent.compress_context(
+                        forced_cfg,
+                        instructions=instructions,
+                    )
                 index_text = self._scroll_index_text(agent)
                 continuation_text = self._scroll_summary_text(agent)
                 cm = getattr(agent, "_context_manager", None)
@@ -419,12 +428,12 @@ class CommandHandler(ConversationCommandHandlerMixin):
         evicted = int(
             compress_stats.get("evicted", inferred_evicted) or 0,
         )
-        reme_cfg = agent_config.running.reme_light_memory_config
-        if self._has_memory_manager() and reme_cfg.summarize_when_compact:
+        if self._has_memory_manager():
             self.memory_manager.add_summarize_task(
                 messages=messages,
                 session_id=self._current_session_id(),
             )
+            self._discard_submitted_pending_markers(messages)
 
         summary = self._get_summary()
         folded = int(compress_stats.get("folded", 0) or 0)
@@ -466,6 +475,14 @@ class CommandHandler(ConversationCommandHandlerMixin):
             f"{folded_line}"
             f"{detail}",
         )
+
+    def _discard_submitted_pending_markers(
+        self,
+        messages: list[Msg],
+    ) -> None:
+        """Remove pending turns covered by the manual compact task."""
+        submitted = {msg.id for msg in messages if msg.id}
+        discard_auto_memory_turns(self._state, submitted)
 
     @staticmethod
     def _scroll_index_text(agent: "Agent") -> str:
@@ -510,13 +527,18 @@ class CommandHandler(ConversationCommandHandlerMixin):
 
     @staticmethod
     def _build_manual_context_config(agent_config: Any) -> Any:
-        """Build a ContextConfig that forces manual /compact to run."""
+        """Build the valid base ContextConfig for standalone compaction."""
         from agentscope.agent import ContextConfig
 
         ccc = agent_config.running.light_context_config.context_compact_config
+        trigger_ratio = ccc.compact_threshold_ratio
+        reserve_ratio = min(
+            ccc.reserve_threshold_ratio,
+            trigger_ratio - 0.000001,
+        )
         return ContextConfig(
-            trigger_ratio=0.000001,
-            reserve_ratio=ccc.reserve_threshold_ratio,
+            trigger_ratio=trigger_ratio,
+            reserve_ratio=reserve_ratio,
         )
 
     async def _build_tmp_agent(self) -> "Agent | None":
@@ -526,7 +548,7 @@ class CommandHandler(ConversationCommandHandlerMixin):
         context trimming, offloading) are reflected immediately.
         """
         try:
-            from agentscope.agent import Agent
+            from agentscope.agent import Agent, InjectionConfig
 
             from ..agents.model_factory import (
                 create_model_and_formatter,
@@ -545,6 +567,9 @@ class CommandHandler(ConversationCommandHandlerMixin):
                 offloader=self._offloader,
                 context_config=self._build_manual_context_config(
                     agent_config,
+                ),
+                injection_config=InjectionConfig(
+                    inject_runtime_state=False,
                 ),
             )
         except Exception:
@@ -599,6 +624,7 @@ class CommandHandler(ConversationCommandHandlerMixin):
         await self._reset_modes()
         if not messages:
             self._set_summary("")
+            reset_auto_memory_turn_state(self._state)
             return await self._make_system_msg(
                 "**No messages to summarize.**\n\n"
                 "- Current memory is empty\n"
@@ -621,6 +647,7 @@ class CommandHandler(ConversationCommandHandlerMixin):
         self._set_summary("")
 
         await self._persist_and_clear()
+        reset_auto_memory_turn_state(self._state)
         return await self._make_system_msg(
             "**New Conversation Started!**\n\n"
             "- Summary task started in background\n"
@@ -637,6 +664,7 @@ class CommandHandler(ConversationCommandHandlerMixin):
         """Process /clear command."""
         await self._persist_and_clear()
         self._set_summary("")
+        reset_auto_memory_turn_state(self._state)
         await self._reset_modes()
         return await self._make_system_msg(
             "**History Cleared!**\n\n"
@@ -1202,6 +1230,12 @@ class CommandHandler(ConversationCommandHandlerMixin):
             for msg in loaded_messages:
                 self._state.context.append(msg)
 
+            # Auto-memory lifecycle data belongs to the context that was
+            # replaced above.  Do not let pending turns, saved snapshots, or
+            # search/seen caches from the previous history leak into the
+            # loaded conversation.
+            reset_auto_memory_turn_state(self._state)
+
             logger.info(
                 f"Loaded {len(loaded_messages)} messages from {history_file}",
             )
@@ -1238,7 +1272,11 @@ class CommandHandler(ConversationCommandHandlerMixin):
         parts = query.strip().lstrip("/").split(" ", maxsplit=1)
         command = parts[0]
         args = parts[1] if len(parts) > 1 else ""
-        logger.info(f"Processing command: {command}, args: {args}")
+        # Command arguments are user-controlled and may contain credentials
+        # (for example, a /compact hint containing an API key).  Do not log
+        # them: downstream handlers sanitize values for their own use, but
+        # logging happens before that handler-specific processing.
+        logger.info("Processing command: %s", command)
 
         handler = getattr(self, f"_process_{command}", None)
         if handler is None:
@@ -1354,9 +1392,11 @@ class CommandHandler(ConversationCommandHandlerMixin):
 
         if not args or args == "on":
             try:
+                workspace = getattr(self._prompt_context, "workspace", None)
                 result = enable_proactive_for_session(
                     self.agent_name,
                     30,
+                    workspace=workspace,
                 )
                 return await self._make_system_msg(
                     msgs["enabled"].format(
@@ -1372,19 +1412,11 @@ class CommandHandler(ConversationCommandHandlerMixin):
 
         elif args == "off":
             try:
-                import asyncio
-                from .memory import proactive_tasks
+                from .memory import disable_proactive_for_session
 
-                if self.agent_name in proactive_tasks:
-                    task = proactive_tasks[self.agent_name]
-                    if not task.done():
-                        task.cancel()
-                        try:
-                            await task
-                        except asyncio.CancelledError:
-                            pass
-                    del proactive_tasks[self.agent_name]
-
+                result = await disable_proactive_for_session(
+                    self.agent_name,
+                )
                 return await self._make_system_msg(
                     msgs["disabled"],
                 )
@@ -1398,9 +1430,11 @@ class CommandHandler(ConversationCommandHandlerMixin):
                 if minutes <= 0:
                     raise ValueError("Minutes must be a positive integer")
 
+                workspace = getattr(self._prompt_context, "workspace", None)
                 result = enable_proactive_for_session(
                     self.agent_name,
                     minutes,
+                    workspace=workspace,
                 )
                 return await self._make_system_msg(
                     msgs["enabled"].format(

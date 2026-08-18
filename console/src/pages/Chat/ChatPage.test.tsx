@@ -190,14 +190,27 @@ vi.mock("@/api/config", () => ({
   getApiToken: vi.fn(() => ""),
 }));
 
-vi.mock("@/stores/agentStore", () => ({
-  useAgentStore: vi.fn(() => ({
+vi.mock("@/stores/agentStore", () => {
+  const useAgentStore = vi.fn(() => ({
     selectedAgent: mockSelectedAgent(),
+    // Upstream reads the agent list to derive backend capabilities.
+    agents: [],
     setSelectedAgent: mockSetSelectedAgent,
     getLastChatId: vi.fn(() => null),
     setLastChatId: vi.fn(),
-  })),
-}));
+  })) as unknown as {
+    (): unknown;
+    subscribe: ReturnType<typeof vi.fn>;
+    getState: ReturnType<typeof vi.fn>;
+  };
+  // sessionListStore subscribes to agent switches at import time.
+  useAgentStore.subscribe = vi.fn(() => () => {});
+  useAgentStore.getState = vi.fn(() => ({
+    selectedAgent: mockSelectedAgent(),
+    agents: [],
+  }));
+  return { useAgentStore };
+});
 
 vi.mock("@/contexts/ThemeContext", () => ({
   useTheme: vi.fn(() => ({ isDark: false })),

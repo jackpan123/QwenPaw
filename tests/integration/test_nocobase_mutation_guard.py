@@ -22,6 +22,7 @@ import json
 import threading
 import time
 from pathlib import Path
+import tempfile
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -567,7 +568,12 @@ def nocobase_console_client(monkeypatch):
 
         @staticmethod
         async def get_or_create_chat(*_args, **kwargs):
-            return SimpleNamespace(id="matrix-chat", name=kwargs["name"])
+            # Upstream reads chat.meta to resolve the session project dir.
+            return SimpleNamespace(
+                id="matrix-chat",
+                name=kwargs["name"],
+                meta={},
+            )
 
     class TaskTracker:
         @staticmethod
@@ -588,6 +594,8 @@ def nocobase_console_client(monkeypatch):
             *,
             owner_id="",
             requester_id=None,
+            # Upstream added an object-identity owner alongside owner_id.
+            owner=None,
         ):
             captured["start_calls"].append(
                 (chat_id, payload, producer, owner_id, requester_id),
@@ -598,6 +606,9 @@ def nocobase_console_client(monkeypatch):
         channel_manager=ChannelManager(),
         chat_manager=ChatManager(),
         task_tracker=TaskTracker(),
+        # Upstream resolves an effective project dir on the chat path.
+        agent_id="default",
+        workspace_dir=Path(tempfile.gettempdir()),
     )
 
     async def get_workspace(_request):
@@ -1181,7 +1192,10 @@ async def test_degraded_intent_still_hits_authoritative_tool_wrapper(
         observed["injected"] = any(
             "不得执行变更" in getattr(block, "text", "")
             for message in inputs
-            if getattr(message, "role", None) == "system"
+            # Upstream now injects dynamic context as a user-role message
+            # named "system" (some providers reject mid-conversation system
+            # turns), so match on the name rather than the role.
+            if getattr(message, "name", None) == "system"
             for block in getattr(message, "content", [])
         )
 

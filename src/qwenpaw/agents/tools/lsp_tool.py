@@ -18,7 +18,10 @@ from agentscope.message import TextBlock
 from agentscope.tool import ToolChunk
 from agentscope.message import ToolResultState
 
-from ...config.context import get_current_workspace_dir
+from ...config.context import (
+    get_current_project_dir,
+    get_current_workspace_dir,
+)
 from ...constant import WORKING_DIR
 from ...runtime.tool_registry import ToolDescriptor, ToolEffectSpec
 from ...security.mutation_guard import ActionEffect
@@ -59,7 +62,7 @@ def _make_response(text: str) -> ToolChunk:
 
 
 def _resolve_root() -> Path:
-    workspace = get_current_workspace_dir()
+    workspace = get_current_project_dir() or get_current_workspace_dir()
     if workspace is not None:
         return workspace
     return WORKING_DIR
@@ -264,6 +267,7 @@ def make_lsp_tool(  # noqa: C901  pylint: disable=too-many-statements
             result = await cancellable_wait(
                 asyncio.to_thread(_run),
                 fallback_secs=_REQUEST_TIMEOUT,
+                as_kill_deadline=True,
             )
         except (asyncio.TimeoutError, asyncio.CancelledError):
             return _make_response(

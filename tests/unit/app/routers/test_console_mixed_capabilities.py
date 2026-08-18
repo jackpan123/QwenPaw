@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -90,7 +92,8 @@ class _ChatManager:
 
     async def get_or_create_chat(self, *_args, **_kwargs):
         self.calls += 1
-        return SimpleNamespace(id="chat-1", name="existing-chat")
+        # Upstream reads chat.meta to resolve the session project dir.
+        return SimpleNamespace(id="chat-1", name="existing-chat", meta={})
 
 
 class _ChannelManager:
@@ -102,6 +105,9 @@ def _workspace():
     return SimpleNamespace(
         channel_manager=_ChannelManager(),
         chat_manager=_ChatManager(),
+        # Upstream resolves an effective project dir on the chat path.
+        agent_id="default",
+        workspace_dir=Path(tempfile.gettempdir()),
     )
 
 
@@ -280,7 +286,11 @@ async def test_owner_mismatch_cannot_schedule_title_side_effect(
             return None
 
         async def get_or_create_chat(self, *_args, **kwargs):
-            return SimpleNamespace(id="victim-chat", name=kwargs["name"])
+            return SimpleNamespace(
+                id="victim-chat",
+                name=kwargs["name"],
+                meta={},
+            )
 
     workspace = _workspace()
     workspace.task_tracker = Tracker()

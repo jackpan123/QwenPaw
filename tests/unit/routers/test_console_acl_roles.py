@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import asyncio
+import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -55,6 +57,9 @@ def _workspace(chat_manager):
         channel_manager=_ChannelManager(),
         chat_manager=chat_manager,
         task_tracker=_TaskTracker(),
+        # Upstream resolves an effective project dir on the chat path.
+        agent_id="default",
+        workspace_dir=Path(tempfile.gettempdir()),
     )
 
 
@@ -189,11 +194,14 @@ async def test_background_endpoint_injects_server_principal(monkeypatch):
             return None
 
         async def get_or_create_chat(self, *_args, **_kwargs):
-            return None
+            # Upstream reads chat.meta to resolve the session project dir.
+            return SimpleNamespace(id="chat-1", name="chat", meta={})
 
     workspace = SimpleNamespace(
         channel_manager=FakeChannelManager(),
         chat_manager=FakeChatManager(),
+        agent_id="default",
+        workspace_dir=Path(tempfile.gettempdir()),
     )
 
     async def fake_get_agent(_request):

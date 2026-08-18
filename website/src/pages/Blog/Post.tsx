@@ -41,7 +41,9 @@ async function fetchBlogPost(
     response = await fetch(`${base}/blog/${slug}.en.md`);
   }
   if (!response.ok) return null;
-  return parseBlogMarkdown(await response.text(), {
+  const md = await response.text();
+  if (!md.trimStart().startsWith("---")) return null;
+  return parseBlogMarkdown(md, {
     sessionList: slug === DEVELOPER_DAY_COLLECTION_SLUG,
   });
 }
@@ -189,7 +191,7 @@ export default function BlogPost() {
     <BlogPostShell>
       <article>
         <nav
-          className="font-inter mb-4 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs text-(--color-text-tertiary) sm:mb-6 sm:text-sm"
+          className="font-inter mb-4 flex items-center gap-x-1.5 text-xs text-(--color-text-tertiary) sm:mb-6 sm:text-sm"
           aria-label="Breadcrumb"
         >
           <Link
@@ -202,7 +204,7 @@ export default function BlogPost() {
           <span className="shrink-0" aria-hidden>
             /
           </span>
-          <span className="min-w-0 truncate text-(--color-text) md:max-w-md">
+          <span className="min-w-0 flex-1 truncate text-(--color-text)">
             {frontmatter.title}
           </span>
         </nav>
@@ -289,13 +291,28 @@ export default function BlogPost() {
                   </code>
                 );
               },
-              img: ({ src, alt, className }) => (
-                <ImageZoom
-                  src={src ?? ""}
-                  alt={alt ?? ""}
-                  className={className}
-                />
-              ),
+              img: ({ src, alt, className }) => {
+                const isVideo = /\.(mp4|webm|ogg|mov)(\?|$)/i.test(src ?? "");
+                if (isVideo) {
+                  return (
+                    <video
+                      src={src ?? undefined}
+                      controls
+                      playsInline
+                      className="my-4 w-full rounded-lg"
+                    >
+                      {alt || t("docs.videoNotSupported")}
+                    </video>
+                  );
+                }
+                return (
+                  <ImageZoom
+                    src={src ?? ""}
+                    alt={alt ?? ""}
+                    className={className}
+                  />
+                );
+              },
             }}
           >
             {isSessionList ? linkifySessionUrls(body) : body}
