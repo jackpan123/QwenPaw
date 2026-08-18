@@ -385,3 +385,52 @@ def test_inbox_read_is_a_mutation_before_handler(
 
     assert response.status_code == expected
     assert calls == ([] if expected == 403 else [["event-1"]])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "endpoint",
+    ["post_console_chat", "post_console_chat_task"],
+)
+async def test_member_cannot_persist_session_project_dir(
+    monkeypatch,
+    tmp_path,
+    endpoint,
+):
+    """Selecting a session project dir is a mutation, not chat.
+
+    ``session_project_dir`` arrives on the CHAT-capability chat routes, so
+    the route-level gate does not cover it. It persists chat state and
+    redirects where the agent reads from, so a guarded member must be
+    refused before ``set_project_dir`` runs.
+    """
+    target = tmp_path / "elsewhere"
+    target.mkdir()
+    set_calls = []
+
+    class ProjectDirChatManager(_ChatManager):
+        async def set_project_dir(self, chat_id, path):
+            set_calls.append((chat_id, path))
+            return SimpleNamespace(id=chat_id, name="c", meta={})
+
+    class _NoRunTracker:
+        async def attach_or_start(self, *_args, **_kwargs):
+            raise AssertionError("must be denied before dispatch")
+
+    workspace = _workspace()
+    workspace.chat_manager = ProjectDirChatManager()
+    workspace.task_tracker = _NoRunTracker()
+
+    async def get_workspace(_request):
+        return workspace
+
+    monkeypatch.setattr(console, "get_agent_for_request", get_workspace)
+
+    body = _chat_body(
+        request_context={"session_project_dir": str(target)},
+    )
+    response = await getattr(console, endpoint)(body, _request(MEMBER))
+
+    status = getattr(response, "status_code", None)
+    assert status == 403, f"expected denial, got {response}"
+    assert set_calls == [], f"member persisted a project dir: {set_calls}"

@@ -164,14 +164,33 @@ async def _apply_session_project_dir(
     workspace,
     chat,
     native_payload: dict[str, Any],
+    *,
+    request: Request | None = None,
+    route: str = "",
 ):
-    """Persist a Session project selection before dispatch."""
+    """Persist a Session project selection before dispatch.
+
+    Returns ``(chat, denial)``. ``session_project_dir`` rides in on the
+    CHAT-capability chat routes, so the route-level gate never sees it, yet
+    applying it persists chat state and redirects where the agent reads
+    from. That makes it a mutation: a guarded read-only caller is refused
+    here, before ``set_project_dir`` runs.
+    """
     request_context = native_payload["meta"].get("request_context")
     if not isinstance(request_context, dict):
-        return chat
+        return chat, None
     raw_value = request_context.pop("session_project_dir", None)
     if not isinstance(raw_value, str) or not raw_value.strip():
-        return chat
+        return chat, None
+
+    if request is not None:
+        denial = guarded_mutation_denial(
+            request,
+            route=route,
+            reason="session_project_dir_requires_privileged_role",
+        )
+        if denial is not None:
+            return chat, denial
 
     def _resolve_target() -> Path:
         target = Path(raw_value).expanduser().resolve()
@@ -190,7 +209,7 @@ async def _apply_session_project_dir(
         chat.id,
         str(target),
     )
-    return updated or chat
+    return (updated or chat), None
 
 
 def _extract_session_and_payload(
@@ -456,11 +475,15 @@ async def post_console_chat(
             # history. Returning a JSON null here left the chat blank.
             return _empty_sse_response()
     else:
-        chat = await _apply_session_project_dir(
+        chat, denial = await _apply_session_project_dir(
             workspace,
             chat,
             native_payload,
+            request=request,
+            route="POST /api/console/chat",
         )
+        if denial is not None:
+            return denial
         from ...config.config import load_agent_config
         from ...services.project_directory import (
             resolve_effective_project_dir,
@@ -958,11 +981,15 @@ async def post_console_chat_task(  # pylint: disable=too-many-statements
         native_payload["channel_id"],
         name=name,
     )
-    chat = await _apply_session_project_dir(
+    chat, denial = await _apply_session_project_dir(
         workspace,
         chat,
         native_payload,
+        request=request,
+        route="POST /api/console/chat/task",
     )
+    if denial is not None:
+        return denial
 
     fork_project_dir = ""
     fork_worktree_branch = ""
