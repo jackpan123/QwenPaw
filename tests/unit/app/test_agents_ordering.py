@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Tests for persisted agent ordering."""
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -43,14 +44,16 @@ def _agent_config(agent_id: str) -> AgentProfileConfig:
     )
 
 
-def _transaction_on(config: Config, after=None):
-    def transaction(update):
-        update(config)
-        if after is not None:
-            after(config)
+def _fake_mutate_config(config: Config, saved: list[Config] | None = None):
+    """Return a fake ``mutate_config`` bound to an in-memory config."""
+
+    def mutate(mutator):
+        mutator(config)
+        if saved is not None:
+            saved.append(config)
         return config
 
-    return transaction
+    return mutate
 
 
 def test_agent_profile_flags_survive_config_round_trip(tmp_path):
@@ -178,11 +181,10 @@ async def test_pin_agent_persists_without_changing_enabled(monkeypatch):
     config.agents.profiles["disabled"].enabled = False
     saved_configs: list[Config] = []
 
-    monkeypatch.setattr(agents_router, "load_config", lambda: config)
     monkeypatch.setattr(
         agents_router,
-        "update_config_transaction",
-        _transaction_on(config, saved_configs.append),
+        "mutate_config",
+        _fake_mutate_config(config, saved_configs),
     )
 
     response = await agents_router.set_agent_pinned("disabled", True)
@@ -199,8 +201,8 @@ async def test_default_agent_cannot_be_unpinned(monkeypatch):
     config = _build_config(["default"])
     monkeypatch.setattr(
         agents_router,
-        "update_config_transaction",
-        _transaction_on(config),
+        "mutate_config",
+        _fake_mutate_config(config),
     )
 
     with pytest.raises(HTTPException) as exc_info:
@@ -219,8 +221,8 @@ async def test_reorder_agents_rejects_incomplete_payload(monkeypatch):
 
     monkeypatch.setattr(
         agents_router,
-        "update_config_transaction",
-        _transaction_on(config),
+        "mutate_config",
+        _fake_mutate_config(config),
     )
 
     with pytest.raises(HTTPException) as exc_info:
@@ -241,17 +243,12 @@ async def test_reorder_agents_persists_valid_order(monkeypatch):
     )
     saved_orders: list[list[str]] = []
 
-    monkeypatch.setattr(agents_router, "load_config", lambda: config)
-    monkeypatch.setattr(
-        agents_router,
-        "update_config_transaction",
-        _transaction_on(
-            config,
-            lambda updated_config: saved_orders.append(
-                list(updated_config.agents.agent_order),
-            ),
-        ),
-    )
+    def fake_mutate(mutator):
+        mutator(config)
+        saved_orders.append(list(config.agents.agent_order))
+        return config
+
+    monkeypatch.setattr(agents_router, "mutate_config", fake_mutate)
 
     response = await agents_router.reorder_agents(
         agents_router.ReorderAgentsRequest(
@@ -274,8 +271,8 @@ async def test_reorder_agents_rejects_non_display_order(monkeypatch):
     )
     monkeypatch.setattr(
         agents_router,
-        "update_config_transaction",
-        _transaction_on(config),
+        "mutate_config",
+        _fake_mutate_config(config),
     )
 
     with pytest.raises(HTTPException) as exc_info:
@@ -298,16 +295,19 @@ async def test_create_agent_appends_new_id_to_order(monkeypatch, tmp_path):
     )
 
     monkeypatch.setattr(agents_router, "load_config", lambda: config)
+    monkeypatch.setattr(agents_router, "WORKING_DIR", tmp_path)
     monkeypatch.setattr(
         agents_router,
-        "update_config_transaction",
-        _transaction_on(config),
+        "mutate_config",
+        _fake_mutate_config(config),
     )
     saved_agents: list[AgentProfileConfig] = []
     monkeypatch.setattr(
         agents_router,
-        "save_agent_config",
-        lambda agent_id, agent_config: saved_agents.append(agent_config),
+        "write_json_atomic",
+        lambda path, data: saved_agents.append(
+            AgentProfileConfig.model_validate(data),
+        ),
     )
     monkeypatch.setattr(
         agents_router,
@@ -340,7 +340,7 @@ async def test_create_agent_appends_new_id_to_order(monkeypatch, tmp_path):
     assert config.agents.agent_order == ["alpha", "default", "beta"]
     assert scheduled_ids == ["beta"]
     assert saved_agents[0].backend == "codex"
-    assert saved_agents[0].workspace_dir == str(tmp_path / "beta")
+    assert Path(saved_agents[0].workspace_dir) == tmp_path / "beta"
 
 
 @pytest.mark.asyncio
@@ -361,8 +361,8 @@ async def test_delete_agent_removes_id_from_order(monkeypatch):
     monkeypatch.setattr(agents_router, "load_config", lambda: config)
     monkeypatch.setattr(
         agents_router,
-        "update_config_transaction",
-        _transaction_on(config),
+        "mutate_config",
+        _fake_mutate_config(config),
     )
     monkeypatch.setattr(
         agents_router,

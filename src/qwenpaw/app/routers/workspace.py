@@ -46,12 +46,13 @@ from ...config import (
     update_config_transaction,
     AgentsRunningConfig,
 )
+from ...config.utils import mutate_config
 from ...config.config import (
+    EmbeddingModelConfig,
     load_agent_config,
     save_agent_config,
     update_agent_config_async,
 )
-from ...config.config import EmbeddingModelConfig
 from ...agents.memory.embedding_model import (
     embedding_vector_space_fingerprint,
     test_embedding_model,
@@ -1296,10 +1297,10 @@ async def put_audio_mode(
         )
     audio_mode = cast(Literal["auto", "native"], raw_audio_mode)
 
-    def update(config: Config) -> None:
+    def apply_audio_mode(config: Config) -> None:
         config.agents.audio_mode = audio_mode
 
-    update_config_transaction(update)
+    await run_sync_io(mutate_config, apply_audio_mode)
     return {"audio_mode": audio_mode}
 
 
@@ -1358,10 +1359,10 @@ async def put_transcription_provider_type(
         raw_provider_type,
     )
 
-    def update(config: Config) -> None:
+    def apply_provider_type(config: Config) -> None:
         config.agents.transcription_provider_type = provider_type
 
-    update_config_transaction(update)
+    await run_sync_io(mutate_config, apply_provider_type)
     return {"transcription_provider_type": provider_type}
 
 
@@ -1423,10 +1424,10 @@ async def put_transcription_provider(
     """Set the transcription provider."""
     provider_id = (body.get("provider_id") or "").strip()
 
-    def update(config: Config) -> None:
+    def apply_provider(config: Config) -> None:
         config.agents.transcription_provider_id = provider_id
 
-    update_config_transaction(update)
+    await run_sync_io(mutate_config, apply_provider)
     return {"provider_id": provider_id}
 
 

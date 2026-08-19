@@ -18,6 +18,7 @@ from agentscope.message import TextBlock
 from agentscope.tool import ToolChunk
 from agentscope.message import ToolResultState
 
+from ...config.config import load_agent_config
 from ...config.utils import read_last_api
 from ...constant import (
     DEFAULT_SPAWN_FOREGROUND_TIMEOUT_SECONDS,
@@ -1045,6 +1046,7 @@ def _build_spawn_request_context(current_agent_id: str) -> dict[str, Any]:
             or ""
         ),
         "root_agent_id": current_agent_id,
+        "parent_session_id": get_current_session_id() or "",
         "user_id": inherited.get("user_id") or get_current_user_id() or "",
         "channel": inherited.get("channel") or get_current_channel() or "",
         "_spawn_subagent": True,
@@ -1201,7 +1203,7 @@ def _normalize_batch(
     return coerced  # type: ignore[return-value]
 
 
-def _build_subagent_request_context(
+async def _build_subagent_request_context(
     current_agent_id: str,
     allowed_tools: Optional[list[str]] = None,
     skills: Optional[list[str]] = None,
@@ -1209,6 +1211,18 @@ def _build_subagent_request_context(
 ) -> dict[str, Any]:
     """Build request_context with approval routing + tool/skill filters."""
     rc = _build_spawn_request_context(current_agent_id)
+    try:
+        agent_config = await asyncio.to_thread(
+            load_agent_config,
+            current_agent_id,
+        )
+        subagent_model = agent_config.subagent_model
+        if subagent_model is not None:
+            rc["model_slot_override"] = subagent_model.model_dump()
+    except Exception:  # pylint: disable=broad-exception-caught
+        # Subagents must remain usable when an optional per-agent model
+        # override cannot be loaded from a stale or synthetic test identity.
+        pass
     if extra:
         rc.update(extra)
     if allowed_tools is not None:
@@ -1374,7 +1388,7 @@ async def spawn_subagent(  # pylint: disable=too-many-return-statements
             skills=skills,
         )
 
-    request_context = _build_subagent_request_context(
+    request_context = await _build_subagent_request_context(
         current_agent_id,
         allowed_tools=allowed_tools,
         skills=skills,
@@ -1523,7 +1537,7 @@ async def _spawn_batch(
                 )
                 return _chunk_text(chunk)
 
-            rc = _build_subagent_request_context(
+            rc = await _build_subagent_request_context(
                 current_agent_id,
                 allowed_tools=spec_allowed,
                 skills=spec_skills,
@@ -1683,7 +1697,7 @@ async def _spawn_forked_subagent(
             "fork_worktree_branch": worktree_branch,
             "fork_scope_id": fork_scope_id,
         }
-    request_context = _build_subagent_request_context(
+    request_context = await _build_subagent_request_context(
         current_agent_id,
         allowed_tools=allowed_tools,
         skills=skills,

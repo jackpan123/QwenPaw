@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 from qwenpaw.exceptions import (
     AppBaseException,
 )
-from ...agents.model_factory import create_model_and_formatter
+from ...agents.model_factory import create_model_and_formatter_async
 from ...security.mutation_guard import RouteCapability
 from ..mutation_authorization import api_capability
 
@@ -21,14 +21,14 @@ from ..mutation_authorization import api_capability
 logger = logging.getLogger(__name__)
 
 
-def get_model():
+async def get_model():
     """Get the active chat model instance.
 
     Returns:
         Chat model instance or None if not configured
     """
     try:
-        model, _ = create_model_and_formatter()
+        model, _ = await create_model_and_formatter_async()
         return model
     except (ValueError, AppBaseException) as e:
         logger.warning("Failed to get model: %s", e)
@@ -182,7 +182,7 @@ async def ai_optimize_skill_stream(request: AIOptimizeSkillRequest):
 
     async def generate():
         try:
-            model = get_model()
+            model = await get_model()
             if not model:
                 error_msg = json.dumps(
                     {

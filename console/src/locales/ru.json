@@ -1473,9 +1473,21 @@
     "oauthWaitingDescription": "Пожалуйста, завершите авторизацию в окне браузера.",
     "oauthConnected": "Успешно подключено к {{provider}}",
     "oauthFailed": "Авторизация не удалась, попробуйте снова",
+    "oauthTimeout": "Время авторизации истекло, попробуйте снова",
     "viewMore": "Показать ещё ({{count}})"
   },
   "models": {
+    "discoveryOriginApi": "Обнаружено через API",
+    "discoveryOriginCatalog": "Официальный каталог",
+    "discoveryOriginBoth": "API + каталог",
+    "availabilityAvailable": "Доступна",
+    "availabilityPermissionDenied": "Нет доступа",
+    "availabilityNotFound": "Не найдена",
+    "availabilityIncompatible": "Несовместима с чатом",
+    "availabilityRateLimited": "Ограничение частоты",
+    "availabilityTransientError": "Временно недоступна",
+    "availabilityUnverified": "Не проверена",
+    "modelAlreadyConfigured": "Настроена",
     "llmConfiguration": "Конфигурация LLM",
     "providersTitle": "Провайдеры",
     "providersDescription": "Настройте API-ключи и endpoints для каждого провайдера.",
@@ -2439,9 +2451,14 @@
       "gotIt": "Понятно"
     },
     "simpleMode": "Простой режим",
-    "fullMode": "Полный режим"
+    "fullMode": "Полный режим",
+    "toggleAgentNavigation": "Развернуть или свернуть навигацию агента"
   },
   "chat": {
+    "groups": {
+      "cronShort": "Расписание",
+      "subagentShort": "Субагент"
+    },
     "fileReference": {
       "codeSnippet": "Фрагмент кода · {{count}} строк"
     },

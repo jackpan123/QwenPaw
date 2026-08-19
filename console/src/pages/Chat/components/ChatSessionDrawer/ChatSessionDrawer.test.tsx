@@ -38,6 +38,7 @@ const {
   mockDeleteChat,
   mockUpdateChat,
   mockGetSessionList,
+  mockListGroups,
   mockNavigate,
   mockGetEffectiveSessionId,
 } = vi.hoisted(() => ({
@@ -47,6 +48,32 @@ const {
   mockDeleteChat: vi.fn().mockResolvedValue(undefined),
   mockUpdateChat: vi.fn().mockResolvedValue(undefined),
   mockGetSessionList: vi.fn().mockResolvedValue([]),
+  mockListGroups: vi.fn().mockResolvedValue([
+    {
+      id: "default",
+      name: "Uncategorized",
+      order: 0,
+      kind: "default",
+      source: "chat",
+      pinned: false,
+    },
+    {
+      id: "cron",
+      name: "Scheduled tasks",
+      order: 1,
+      kind: "cron",
+      source: "cron",
+      pinned: false,
+    },
+    {
+      id: "subagents",
+      name: "Subagents",
+      order: 2,
+      kind: "subagents",
+      source: "subagent",
+      pinned: false,
+    },
+  ]),
   mockNavigate: vi.fn(),
   mockGetEffectiveSessionId: vi.fn((id: string) => id),
 }));
@@ -62,7 +89,15 @@ vi.mock("@agentscope-ai/chat", () => ({
 }));
 
 vi.mock("@/api/modules/chat", () => ({
-  chatApi: { deleteChat: mockDeleteChat, updateChat: mockUpdateChat },
+  chatApi: {
+    deleteChat: mockDeleteChat,
+    updateChat: mockUpdateChat,
+    listGroups: mockListGroups,
+    createGroup: vi.fn(),
+    updateGroup: vi.fn(),
+    reorderGroups: vi.fn(),
+    deleteGroup: vi.fn(),
+  },
   sessionApi: {
     listChats: vi.fn(),
     createChat: vi.fn(),
@@ -144,6 +179,7 @@ vi.mock("../../../../components/SessionItem", () => ({
     onClick,
     onEdit,
     onDelete,
+    pinned,
     onPin,
     onArchive,
     onEditSubmit,
@@ -162,7 +198,10 @@ vi.mock("../../../../components/SessionItem", () => ({
         </button>
       ) : null}
       {onPin ? (
-        <button data-testid="pin-btn" onClick={() => onPin(sessionId)}>
+        <button
+          data-testid="pin-btn"
+          onClick={() => onPin(sessionId, !pinned)}
+        >
           pin
         </button>
       ) : null}
@@ -282,11 +321,7 @@ describe("ChatSessionDrawer", () => {
     const user = userEvent.setup();
     const onClose = vi.fn();
     renderWithProviders(<ChatSessionDrawer open onClose={onClose} />);
-    await user.click(
-      document
-        .querySelector('[data-icon="SparkOperateRightLine"]')!
-        .closest("button")!,
-    );
+    await user.click(screen.getByRole("button", { name: "common.close" }));
     expect(onClose).toHaveBeenCalledOnce();
   });
 
@@ -442,24 +477,24 @@ describe("ChatSessionDrawer", () => {
     expect(await screen.findByText("Agent B Chat")).toBeInTheDocument();
   });
 
-  it("pinned sessions sort before unpinned", async () => {
+  it("places pinned sessions at the top of their group", async () => {
     mockGetSessionList.mockResolvedValue([
       {
         id: "s1",
-        name: "Unpinned",
+        name: "Recent unpinned",
         pinned: false,
         updatedAt: new Date().toISOString(),
       },
       {
         id: "s2",
-        name: "Pinned",
+        name: "Old pinned",
         pinned: true,
-        updatedAt: new Date().toISOString(),
+        updatedAt: "2000-01-01T00:00:00.000Z",
       },
     ]);
     renderWithProviders(<ChatSessionDrawer {...defaultProps} />);
     const items = await screen.findAllByTestId("session-item");
-    expect(items[0]).toHaveTextContent("Pinned");
-    expect(items[1]).toHaveTextContent("Unpinned");
+    expect(items[0]).toHaveTextContent("Old pinned");
+    expect(items[1]).toHaveTextContent("Recent unpinned");
   });
 });

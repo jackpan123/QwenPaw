@@ -17,6 +17,7 @@ from ...providers.oauth import (
 from ...providers.oauth.base import OAuthFlow
 from ...providers.provider_manager import ProviderManager
 from ...security.mutation_guard import RouteCapability
+from ...utils.logging import sanitize_log_value
 from ..mutation_authorization import api_capability
 
 logger = logging.getLogger(__name__)
@@ -160,7 +161,7 @@ async def oauth_callback(
         )
     except Exception as exc:
         logger.exception(
-            f"OAuth exchange failed for {provider_id}",
+            f"OAuth exchange failed for {sanitize_log_value(provider_id)}",
         )
         _session_store.fail(session_state, str(exc))
         return HTMLResponse(
@@ -171,7 +172,7 @@ async def oauth_callback(
     # Save credentials to provider config
     credential = flow.get_credential_dict(token_result)
     if credential:
-        if not manager.update_provider(provider_id, credential):
+        if not await manager.update_provider_async(provider_id, credential):
             _session_store.fail(session_state, "Provider not found")
             return HTMLResponse(
                 content=_error_html("Provider not found."),
@@ -182,8 +183,9 @@ async def oauth_callback(
             await manager.fetch_provider_models(provider_id)
         except Exception:
             logger.warning(
-                f"Model discovery failed for {provider_id} "
-                f"after OAuth, will retry on next list",
+                "Model discovery failed for "
+                f"{sanitize_log_value(provider_id)} "
+                "after OAuth, will retry on next list",
             )
         _session_store.complete(session_state, credential)
     else:
