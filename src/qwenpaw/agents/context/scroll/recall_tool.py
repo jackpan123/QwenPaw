@@ -33,7 +33,8 @@ from typing import Any, Optional
 from agentscope.message import TextBlock, ToolResultState
 from agentscope.tool import ToolChunk
 
-from ....runtime.tool_registry import ToolDescriptor
+from ....runtime.tool_registry import ToolDescriptor, ToolEffectSpec
+from ....security.mutation_guard import ActionEffect
 from ....utils.io_utils import run_sync_io
 from ...tools.utils import DEFAULT_MAX_BYTES
 
@@ -1054,6 +1055,7 @@ def make_recall_history(
         func=recall_history,
         async_execution=True,
         description=_DOC.splitlines()[0],
+        effect=ToolEffectSpec(default=ActionEffect.READ),
     )
     # pylint: disable-next=protected-access
     recall_history._tool_descriptor = descriptor  # type: ignore[attr-defined]

@@ -27,6 +27,7 @@ from ..capabilities import (
     DriverInvocation,
     DriverInvocationResult,
 )
+from ...security.mutation_guard import MutationDecision
 
 logger = logging.getLogger(__name__)
 
@@ -149,7 +150,7 @@ class DriverCapabilityTool(ToolBase):
         self,
         capability: DriverCapability,
         invoker: DriverInvoker,
-        request_context: dict[str, str] | None = None,
+        request_context: dict[str, Any] | None = None,
     ) -> None:
         self.name = capability.exposure.tool_name or capability.name
         self.description = capability.description
@@ -158,17 +159,59 @@ class DriverCapabilityTool(ToolBase):
         self._invoker = invoker
         self._request_context = dict(request_context or {})
 
+    def _authorize(
+        self,
+        input_data: dict[str, Any] | None,
+    ) -> MutationDecision:
+        """Run the shared role gate with Driver-specific audit identity."""
+        from ...runtime.tool_registry import ToolEffectSpec
+        from ...security.mutation_guard.tool_gate import (
+            authorize_tool_call_and_audit,
+        )
+
+        return authorize_tool_call_and_audit(
+            request_context=self._request_context,
+            effect_spec=ToolEffectSpec(default=self._capability.effect),
+            input_data=input_data,
+            tool_name=self.name,
+            audit_event="driver_tool_denied",
+        )
+
     async def check_permissions(
         self,
+        input_data: dict[str, Any] | None = None,
         *_args: Any,
         **_kwargs: Any,
     ) -> Any:
+        # Authoritative role-based mutation gate (runs FIRST).  A
+        # non-privileged member is denied any capability whose effect is
+        # not READ/CHAT_INFRASTRUCTURE, even when the Driver's own policy
+        # would allow it.  No-op for local / unauthenticated operation:
+        # with no ``request_principal`` (or one that is not guarded /
+        # can_mutate), :func:`authorize_effect` already returns allowed.
+        from ...security.mutation_guard.tool_gate import (
+            mutation_denial_message,
+        )
+
+        decision = self._authorize(input_data)
+        if not decision.allowed:
+            return PermissionDecision(
+                behavior=PermissionBehavior.DENY,
+                message=mutation_denial_message(decision),
+            )
         return PermissionDecision(
             behavior=PermissionBehavior.ALLOW,
             message="Driver capability policy is handled by Driver.",
         )
 
     async def __call__(self, **kwargs: Any) -> Any:
+        from ...security.mutation_guard.tool_gate import (
+            mutation_denied_tool_chunk,
+        )
+
+        decision = self._authorize(kwargs)
+        if not decision.allowed:
+            return mutation_denied_tool_chunk(decision)
         result = await self._invoker(
             DriverInvocation(
                 capability_id=self._capability.capability_id,

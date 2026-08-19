@@ -19,6 +19,10 @@ from ...browser.tool_entrypoint import (
     name="browser",
     enabled_by_default=True,
     async_execution=True,
+    # The unified browser runs arbitrary Browser SDK code, so unlike the
+    # deprecated action-enum tool there is no read-only action subset to
+    # whitelist — every call must be treated as an external side effect.
+    side_effect="external_side_effect",
     description=_BROWSER_TOOL_DESCRIPTION,
     tool_type="network",
     policy_name="Browser",

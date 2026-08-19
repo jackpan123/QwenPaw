@@ -24,15 +24,18 @@ from ...agents.acp.node_runtime import (
 from ...config import (
     ChannelConfig,
     ChannelConfigUnion,
+    Config,
     ToolGuardConfig,
     ToolGuardRuleConfig,
     get_available_channels,
     load_config,
     save_config,
+    update_config_transaction,
 )
 from ...config.config import (
     AgentsLLMRoutingConfig,
     HeartbeatConfig,
+    MutationGuardConfig,
     SkillScannerConfig,
     SkillScannerWhitelistEntry,
 )
@@ -582,12 +585,13 @@ async def put_acp_node_runtime(
                 },
             )
 
-    config = load_config()
-    config.acp.node_path = node_path
-    save_config(config)
+    def update(config: Config) -> None:
+        config.acp.node_path = node_path
+
+    update_config_transaction(update)
     return await asyncio.to_thread(
         get_node_runtime_status,
-        config.acp.node_path,
+        node_path,
     )
 
 
@@ -776,9 +780,10 @@ async def get_agents_llm_routing() -> AgentsLLMRoutingConfig:
 async def put_agents_llm_routing(
     body: AgentsLLMRoutingConfig = Body(...),
 ) -> AgentsLLMRoutingConfig:
-    config = load_config()
-    config.agents.llm_routing = body
-    save_config(config)
+    def update(config: Config) -> None:
+        config.agents.llm_routing = body
+
+    update_config_transaction(update)
     return body
 
 
@@ -812,10 +817,40 @@ async def put_user_timezone(
             status_code=400,
             detail=f"Invalid IANA timezone: {tz!r}",
         )
-    config = load_config()
-    config.user_timezone = resolved
-    save_config(config)
+
+    def update(config: Config) -> None:
+        config.user_timezone = resolved
+
+    update_config_transaction(update)
     return {"timezone": resolved}
+
+
+# ── Security / Mutation Guard ────────────────────────────────────────
+
+
+@router.get(
+    "/security/mutation-guard",
+    response_model=MutationGuardConfig,
+    summary="Get mutation guard settings",
+)
+async def get_mutation_guard() -> MutationGuardConfig:
+    config = load_config()
+    return config.security.mutation_guard
+
+
+@router.put(
+    "/security/mutation-guard",
+    response_model=MutationGuardConfig,
+    summary="Update mutation guard settings",
+)
+async def put_mutation_guard(
+    body: MutationGuardConfig = Body(...),
+) -> MutationGuardConfig:
+    def update(config: Config) -> None:
+        config.security.mutation_guard = body
+
+    updated = update_config_transaction(update)
+    return updated.security.mutation_guard
 
 
 # ── Security / Tool Guard ────────────────────────────────────────────
@@ -839,9 +874,10 @@ async def get_tool_guard() -> ToolGuardConfig:
 async def put_tool_guard(
     body: ToolGuardConfig = Body(...),
 ) -> ToolGuardConfig:
-    config = load_config()
-    config.security.tool_guard = body
-    save_config(config)
+    def update(config: Config) -> None:
+        config.security.tool_guard = body
+
+    update_config_transaction(update)
 
     from ...security.tool_guard.engine import get_guard_engine
 
@@ -987,23 +1023,15 @@ async def get_sandbox_setting(
 async def put_sandbox_setting(
     body: SandboxSettingBody = Body(...),
 ) -> SandboxStatusResponse:
-    config = load_config()
-    current_enabled = config.security.sandbox_enabled
+    def update(config: Config) -> None:
+        # Idempotent: an unchanged value leaves the transaction untouched so
+        # no write happens. Upstream dropped the Windows admin 403 — enabling
+        # now saves and surfaces effective=False/reason="unelevated" instead.
+        if body.enabled == config.security.sandbox_enabled:
+            return
+        config.security.sandbox_enabled = body.enabled
 
-    # Idempotent: if the value hasn't changed, return current status
-    # without triggering the admin guard. This prevents partial-save
-    # issues when the frontend saves other security settings alongside
-    # an unchanged sandbox value.
-    if body.enabled == current_enabled:
-        effective, reason = await _sandbox_effective_status(body.enabled)
-        return SandboxStatusResponse(
-            enabled=body.enabled,
-            effective=effective,
-            reason=reason,
-        )
-
-    config.security.sandbox_enabled = body.enabled
-    save_config(config)
+    update_config_transaction(update)
     effective, reason = await _sandbox_effective_status(body.enabled)
     return SandboxStatusResponse(
         enabled=body.enabled,
@@ -1055,23 +1083,23 @@ async def get_file_guard() -> FileGuardResponse:
 async def put_file_guard(
     body: FileGuardUpdateBody,
 ) -> FileGuardResponse:
-    config = load_config()
-    fg = config.security.file_guard
+    def update(config: Config) -> None:
+        fg = config.security.file_guard
+        if body.enabled is not None:
+            fg.enabled = body.enabled
+        if body.paths is not None:
+            from ...security.tool_guard.guardians.file_guardian import (
+                ensure_file_guard_paths,
+            )
 
-    if body.enabled is not None:
-        fg.enabled = body.enabled
-    if body.paths is not None:
-        from ...security.tool_guard.guardians.file_guardian import (
-            ensure_file_guard_paths,
-        )
+            fg.sensitive_files = ensure_file_guard_paths(body.paths)
+        if body.allow_preview_outside_workspace is not None:
+            fg.allow_preview_outside_workspace = (
+                body.allow_preview_outside_workspace
+            )
 
-        fg.sensitive_files = ensure_file_guard_paths(body.paths)
-    if body.allow_preview_outside_workspace is not None:
-        fg.allow_preview_outside_workspace = (
-            body.allow_preview_outside_workspace
-        )
-
-    save_config(config)
+    updated = update_config_transaction(update)
+    fg = updated.security.file_guard
 
     from ...security.tool_guard.engine import get_guard_engine
 
@@ -1106,9 +1134,10 @@ async def get_skill_scanner() -> SkillScannerConfig:
 async def put_skill_scanner(
     body: SkillScannerConfig = Body(...),
 ) -> SkillScannerConfig:
-    config = load_config()
-    config.security.skill_scanner = body
-    save_config(config)
+    def update(config: Config) -> None:
+        config.security.skill_scanner = body
+
+    update_config_transaction(update)
     return body
 
 
@@ -1166,24 +1195,23 @@ async def add_to_whitelist(
     if not skill_name:
         raise HTTPException(status_code=400, detail="skill_name is required")
 
-    config = load_config()
-    scanner_cfg = config.security.skill_scanner
+    def update(config: Config) -> None:
+        scanner_cfg = config.security.skill_scanner
+        for entry in scanner_cfg.whitelist:
+            if entry.skill_name == skill_name:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Skill '{skill_name}' is already whitelisted",
+                )
+        scanner_cfg.whitelist.append(
+            SkillScannerWhitelistEntry(
+                skill_name=skill_name,
+                content_hash=content_hash,
+                added_at=datetime.now(timezone.utc).isoformat(),
+            ),
+        )
 
-    for entry in scanner_cfg.whitelist:
-        if entry.skill_name == skill_name:
-            raise HTTPException(
-                status_code=409,
-                detail=f"Skill '{skill_name}' is already whitelisted",
-            )
-
-    scanner_cfg.whitelist.append(
-        SkillScannerWhitelistEntry(
-            skill_name=skill_name,
-            content_hash=content_hash,
-            added_at=datetime.now(timezone.utc).isoformat(),
-        ),
-    )
-    save_config(config)
+    update_config_transaction(update)
     return {"whitelisted": True, "skill_name": skill_name}
 
 
@@ -1194,18 +1222,21 @@ async def add_to_whitelist(
 async def remove_from_whitelist(
     skill_name: str = Path(..., min_length=1),
 ) -> dict:
-    config = load_config()
-    scanner_cfg = config.security.skill_scanner
-    original_len = len(scanner_cfg.whitelist)
-    scanner_cfg.whitelist = [
-        e for e in scanner_cfg.whitelist if e.skill_name != skill_name
-    ]
-    if len(scanner_cfg.whitelist) == original_len:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Skill '{skill_name}' not found in whitelist",
-        )
-    save_config(config)
+    def update(config: Config) -> None:
+        scanner_cfg = config.security.skill_scanner
+        original_len = len(scanner_cfg.whitelist)
+        scanner_cfg.whitelist = [
+            entry
+            for entry in scanner_cfg.whitelist
+            if entry.skill_name != skill_name
+        ]
+        if len(scanner_cfg.whitelist) == original_len:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Skill '{skill_name}' not found in whitelist",
+            )
+
+    update_config_transaction(update)
     return {"removed": True, "skill_name": skill_name}
 
 
@@ -1297,7 +1328,8 @@ async def put_allow_no_auth_hosts(
             ),
         )
 
-    config = load_config()
-    config.security.allow_no_auth_hosts = normalized_hosts
-    save_config(config)
+    def update(config: Config) -> None:
+        config.security.allow_no_auth_hosts = normalized_hosts
+
+    update_config_transaction(update)
     return AllowNoAuthHostsResponse(hosts=normalized_hosts)

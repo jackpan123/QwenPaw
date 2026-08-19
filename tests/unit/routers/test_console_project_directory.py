@@ -32,7 +32,12 @@ async def test_apply_session_project_dir_persists_before_dispatch(
         },
     }
 
-    result = await _apply_session_project_dir(workspace, chat, payload)
+    result, denial = await _apply_session_project_dir(
+        workspace,
+        chat,
+        payload,
+    )
+    assert denial is None
 
     assert result is updated_chat
     workspace.chat_manager.set_project_dir.assert_awaited_once_with(
@@ -86,7 +91,12 @@ async def test_apply_session_project_dir_ignores_other_context() -> None:
         },
     }
 
-    result = await _apply_session_project_dir(workspace, chat, payload)
+    result, denial = await _apply_session_project_dir(
+        workspace,
+        chat,
+        payload,
+    )
+    assert denial is None
 
     assert result is chat
     workspace.chat_manager.set_project_dir.assert_not_awaited()

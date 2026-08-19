@@ -9,11 +9,14 @@ from pydantic import BaseModel
 from ..auth import (
     ExternalLoginDenied,
     authenticate_external_login,
+    build_identity_principal,
     is_auth_enabled,
     resolve_client_ip,
     resolve_external_identity,
 )
+from ..mutation_authorization import api_capability
 from ..rate_limiter import rate_limiter
+from ...security.mutation_guard import RequestPrincipal, RouteCapability
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -35,6 +38,7 @@ class AuthStatusResponse(BaseModel):
 
 
 @router.post("/login")
+@api_capability(RouteCapability.PUBLIC)
 async def login(request: Request, req: LoginRequest):
     """Authenticate with username/password via the external provider."""
     if not is_auth_enabled():
@@ -90,17 +94,39 @@ async def login(request: Request, req: LoginRequest):
 
 
 @router.get("/status")
+@api_capability(RouteCapability.READ)
 async def auth_status():
     """Report auth mode. Users are owned by the external provider."""
     return AuthStatusResponse(enabled=is_auth_enabled(), mode="nocobase")
 
 
 @router.get("/verify")
+@api_capability(RouteCapability.READ)
 async def verify(request: Request):
     """Verify that the caller's external token is still valid."""
     if not is_auth_enabled():
-        return {"valid": True, "username": ""}
-    identity = await resolve_external_identity(request)
-    if identity is None:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
-    return {"valid": True, "username": identity.sender_id}
+        return {
+            "valid": True,
+            "username": "",
+            "roles": [],
+            "can_mutate": True,
+        }
+    principal = getattr(request.state, "request_principal", None)
+    if (
+        not isinstance(principal, RequestPrincipal)
+        or not principal.user_id
+        or not principal.source
+    ):
+        identity = await resolve_external_identity(request)
+        if identity is None:
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid or expired token",
+            )
+        principal = build_identity_principal(identity, auth_enabled=True)
+    return {
+        "valid": True,
+        "username": principal.user_id,
+        "roles": list(principal.roles),
+        "can_mutate": principal.can_mutate,
+    }

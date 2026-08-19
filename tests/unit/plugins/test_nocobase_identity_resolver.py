@@ -140,3 +140,4 @@ async def test_roles_extracted_into_identity() -> None:
     result = await resolve(_Req({"X-NocoBase-Token": "t"}))
     assert result.sender_id == "eve@example.com"
     assert result.roles == ["admin", "member"]
+    assert result.source == "nocobase"

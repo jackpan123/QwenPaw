@@ -1,5 +1,6 @@
 import React, {
   useCallback,
+  useEffect,
   useRef,
   useState,
   forwardRef,
@@ -12,6 +13,7 @@ import { LoadingOutlined } from "@ant-design/icons";
 import { useTranslation } from "react-i18next";
 import { agentApi, TranscriptionError } from "@/api/modules/agent";
 import { useUploadLimitStore } from "@/stores/uploadLimitStore";
+import { useAuthorizationStore } from "@/stores/authorizationStore";
 
 const MAX_RECORDING_DURATION_MS = 5 * 60 * 1000; // 5 minutes
 
@@ -98,19 +100,41 @@ const WhisperSpeechButton = forwardRef<
   const chunksRef = useRef<Blob[]>([]);
   const internalRecordingRef = useRef(false);
   const recordingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const releaseStreamRef = useRef<(() => void) | null>(null);
+  const mountedRef = useRef(true);
+  const suppressTranscriptionRef = useRef(false);
 
   const stopRecording = useCallback(() => {
     if (mediaRecorderRef.current && internalRecordingRef.current) {
       mediaRecorderRef.current.stop();
       internalRecordingRef.current = false;
-      setRecording(false);
+      if (mountedRef.current) setRecording(false);
     }
   }, []);
 
   const startRecording = useCallback(async () => {
-    if (internalRecordingRef.current || loading) return;
+    if (
+      !useAuthorizationStore.getState().canMutate ||
+      internalRecordingRef.current ||
+      loading
+    ) {
+      return;
+    }
+    suppressTranscriptionRef.current = false;
+    let stream: MediaStream | null = null;
+    let releaseStream: (() => void) | null = null;
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      let streamReleased = false;
+      releaseStream = () => {
+        if (streamReleased) return;
+        streamReleased = true;
+        stream?.getTracks().forEach((track) => track.stop());
+      };
+      if (!mountedRef.current || !useAuthorizationStore.getState().canMutate) {
+        releaseStream();
+        return;
+      }
       const mimeType = MediaRecorder.isTypeSupported("audio/webm")
         ? "audio/webm"
         : "audio/mp4";
@@ -124,12 +148,28 @@ const WhisperSpeechButton = forwardRef<
       };
 
       recorder.onstop = async () => {
-        stream.getTracks().forEach((track) => track.stop());
+        const recordedChunks = chunksRef.current;
+        releaseStream?.();
+        if (releaseStreamRef.current === releaseStream) {
+          releaseStreamRef.current = null;
+        }
         if (recordingTimerRef.current) {
           clearTimeout(recordingTimerRef.current);
           recordingTimerRef.current = null;
         }
-        const blob = new Blob(chunksRef.current, { type: mimeType });
+        internalRecordingRef.current = false;
+        mediaRecorderRef.current = null;
+        chunksRef.current = [];
+        if (mountedRef.current) setRecording(false);
+        if (
+          !mountedRef.current ||
+          suppressTranscriptionRef.current ||
+          !useAuthorizationStore.getState().canMutate
+        ) {
+          return;
+        }
+
+        const blob = new Blob(recordedChunks, { type: mimeType });
 
         // File size validation
         const sizeMb = blob.size / 1024 / 1024;
@@ -144,13 +184,33 @@ const WhisperSpeechButton = forwardRef<
           return;
         }
 
+        if (!mountedRef.current) return;
         setLoading(true);
         try {
+          if (
+            !mountedRef.current ||
+            suppressTranscriptionRef.current ||
+            !useAuthorizationStore.getState().canMutate
+          ) {
+            return;
+          }
           const result = await agentApi.transcribeAudio(blob);
-          if (result.text) {
+          if (
+            result.text &&
+            mountedRef.current &&
+            !suppressTranscriptionRef.current &&
+            useAuthorizationStore.getState().canMutate
+          ) {
             onTranscription(result.text);
           }
         } catch (err) {
+          if (
+            !mountedRef.current ||
+            suppressTranscriptionRef.current ||
+            !useAuthorizationStore.getState().canMutate
+          ) {
+            return;
+          }
           if (err instanceof TranscriptionError) {
             switch (err.code) {
               case "TRANSCRIPTION_DISABLED":
@@ -172,14 +232,15 @@ const WhisperSpeechButton = forwardRef<
           }
           console.error("Transcription error:", err);
         } finally {
-          setLoading(false);
+          if (mountedRef.current) setLoading(false);
         }
       };
 
       recorder.start();
       mediaRecorderRef.current = recorder;
+      releaseStreamRef.current = releaseStream;
       internalRecordingRef.current = true;
-      setRecording(true);
+      if (mountedRef.current) setRecording(true);
 
       // Auto-stop after max duration
       recordingTimerRef.current = setTimeout(() => {
@@ -193,6 +254,8 @@ const WhisperSpeechButton = forwardRef<
         }
       }, MAX_RECORDING_DURATION_MS);
     } catch (err) {
+      releaseStream?.();
+      if (!mountedRef.current) return;
       console.error("Microphone access error:", err);
       message.error(t("chat.speech.microphoneError"));
     }
@@ -200,12 +263,43 @@ const WhisperSpeechButton = forwardRef<
 
   const toggleRecording = useCallback(() => {
     if (loading) return;
+    if (!useAuthorizationStore.getState().canMutate) {
+      if (internalRecordingRef.current) {
+        suppressTranscriptionRef.current = true;
+        stopRecording();
+      }
+      return;
+    }
     if (internalRecordingRef.current) {
       stopRecording();
     } else {
       startRecording();
     }
   }, [loading, startRecording, stopRecording]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      suppressTranscriptionRef.current = true;
+      if (recordingTimerRef.current) {
+        clearTimeout(recordingTimerRef.current);
+        recordingTimerRef.current = null;
+      }
+      const recorder = mediaRecorderRef.current;
+      if (recorder && internalRecordingRef.current) {
+        try {
+          recorder.stop();
+        } finally {
+          releaseStreamRef.current?.();
+        }
+      }
+      internalRecordingRef.current = false;
+      mediaRecorderRef.current = null;
+      releaseStreamRef.current = null;
+      chunksRef.current = [];
+    };
+  }, []);
 
   // Expose methods via ref
   useImperativeHandle(

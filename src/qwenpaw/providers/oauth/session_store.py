@@ -19,8 +19,9 @@ class OAuthSession:
     state: str
     code_verifier: str
     callback_url: str
+    initiator_user_id: str = ""
     created_at: float = field(default_factory=time.monotonic)
-    status: str = "pending"  # pending | completed | failed
+    status: str = "pending"  # pending | processing | completed | failed
     error: Optional[str] = None
     # Stored after successful exchange
     credential: Optional[dict] = None
@@ -49,6 +50,7 @@ class OAuthSessionStore:
         state: str,
         code_verifier: str,
         callback_url: str,
+        initiator_user_id: str = "",
     ) -> OAuthSession:
         """Create and store a new OAuth session."""
         self._purge_expired()
@@ -57,6 +59,7 @@ class OAuthSessionStore:
             state=state,
             code_verifier=code_verifier,
             callback_url=callback_url,
+            initiator_user_id=initiator_user_id,
         )
         self._sessions[state] = session
         return session
@@ -90,6 +93,22 @@ class OAuthSessionStore:
         if not candidates:
             return None
         return max(candidates, key=lambda s: s.created_at)
+
+    def claim(
+        self,
+        state: str,
+        provider_id: str,
+    ) -> Optional[OAuthSession]:
+        """Atomically claim one pending state for its provider callback."""
+        session = self.get(state)
+        if (
+            session is None
+            or session.provider_id != provider_id
+            or session.status != "pending"
+        ):
+            return None
+        session.status = "processing"
+        return session
 
     def complete(
         self,

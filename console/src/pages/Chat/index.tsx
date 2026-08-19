@@ -173,6 +173,8 @@ import {
   getSessionIdFromPath,
 } from "../../utils/sessionRoute";
 import { useUploadLimitStore } from "../../stores/uploadLimitStore";
+import { useAuthorizationStore } from "../../stores/authorizationStore";
+import MessageQueuePanel from "./components/MessageQueuePanel";
 import ChatSenderTabsPanel from "./components/ChatSenderTabsPanel";
 import {
   selectTasksForSession,
@@ -1222,6 +1224,7 @@ export default function ChatPage() {
     });
   }, [currentSessionFilesScopeKey, dispatchFilesDrawer]);
   const loopAvailableModes = useLoopStore((state) => state.availableModes);
+  const canMutate = useAuthorizationStore((state) => state.canMutate);
 
   useEffect(() => {
     const openPreview = (event: Event) => {
@@ -2221,7 +2224,7 @@ export default function ChatPage() {
         e.key.toLowerCase() === "m"
       ) {
         e.preventDefault();
-        if (whisperEnabled) {
+        if (whisperEnabled && useAuthorizationStore.getState().canMutate) {
           whisperSpeechRef.current?.toggleRecording();
         }
       }
@@ -2721,6 +2724,7 @@ export default function ChatPage() {
       onProgress?: (e: { percent?: number }) => void;
     }) => {
       const { file, onSuccess, onError, onProgress } = options;
+      if (!useAuthorizationStore.getState().canMutate) return;
       try {
         // Warn when model has no multimodal support
         if (usesQwenPawBackend && !multimodalCaps.supportsMultimodal) {
@@ -3191,7 +3195,7 @@ export default function ChatPage() {
         ) : undefined,
         prefix: (
           <>
-            {whisperEnabled ? (
+            {whisperEnabled && canMutate ? (
               <WhisperSpeechButton
                 ref={whisperSpeechRef}
                 onTranscription={handleWhisperTranscription}
@@ -3240,7 +3244,7 @@ export default function ChatPage() {
             ) : null}
           </span>
         ),
-        ...(supportsAttachments
+        ...(canMutate && supportsAttachments
           ? {
               attachments: {
                 multiple: true,
@@ -3284,7 +3288,10 @@ export default function ChatPage() {
                   ),
               },
             }
-          : {}),
+          : {
+              attachments: undefined,
+              longTextUpload: undefined,
+            }),
         placeholder: extPlaceholder ?? t("chat.inputPlaceholder"),
         ...(extDisclaimer !== undefined ? { disclaimer: extDisclaimer } : {}),
         suggestions: [...baseSuggestions, ...activePluginSuggestions],
@@ -3512,6 +3519,7 @@ export default function ChatPage() {
     toggleHistoryPanel,
     handleCompactCommand,
     handleNewCommand,
+    canMutate,
     compactSender,
     sessionScope,
     filesWorkspaceOpen,

@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """Console APIs: push messages, chat, and file upload for chat."""
+
 from __future__ import annotations
 
 import asyncio
@@ -27,14 +28,19 @@ from qwenpaw.schemas import (
     AgentRequest,
     _coerce_content_item,
 )
+from qwenpaw.security.mutation_guard import (
+    RequestPrincipal,
+    RouteCapability,
+)
 from qwenpaw.utils.timeout import resolve_stream_task_timeout
 from ...utils.logging import LOG_FILE_PATH, sanitize_log_value
 from ..agent_context import get_agent_for_request
 from ..approvals.display import approval_display_fields
 from ..chats.manager import ChatManager
 from ..chats.title_generator import generate_and_update_title
+from ..mutation_authorization import api_capability, guarded_mutation_denial
+from ..task_tracker import RunOwnershipError
 from ..utils import check_upload_size
-
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +59,7 @@ class _BackgroundTask:
     finished_at: Optional[float] = None
     result: Optional[Dict[str, Any]] = None
     asyncio_task: Optional[asyncio.Task] = None
+    owner_id: str = ""
 
 
 _bg_tasks: Dict[str, _BackgroundTask] = {}
@@ -134,18 +141,56 @@ def _read_request_field(request_data: Union[AgentRequest, dict], name: str):
     return request_data.get(name)
 
 
+def _guarded_requester_id(request: Request) -> str | None:
+    """Return the owner id enforced for a guarded read-only member."""
+    principal = getattr(request.state, "request_principal", None)
+    if (
+        isinstance(principal, RequestPrincipal)
+        and principal.guarded
+        and not principal.can_mutate
+    ):
+        return principal.user_id
+    return None
+
+
+# Reserved request_context keys that the client must NEVER supply. Only
+# the server (the trusted request principal) may write these. Dropping
+# any client-supplied occurrence closes a privilege-escalation vector:
+# otherwise a request body could forge an admin identity.
+_RESERVED_PRINCIPAL_KEYS = frozenset({"request_principal", "acl_principal"})
+
+
 async def _apply_session_project_dir(
     workspace,
     chat,
     native_payload: dict[str, Any],
+    *,
+    request: Request | None = None,
+    route: str = "",
 ):
-    """Persist a Session project selection before dispatch."""
+    """Persist a Session project selection before dispatch.
+
+    Returns ``(chat, denial)``. ``session_project_dir`` rides in on the
+    CHAT-capability chat routes, so the route-level gate never sees it, yet
+    applying it persists chat state and redirects where the agent reads
+    from. That makes it a mutation: a guarded read-only caller is refused
+    here, before ``set_project_dir`` runs.
+    """
     request_context = native_payload["meta"].get("request_context")
     if not isinstance(request_context, dict):
-        return chat
+        return chat, None
     raw_value = request_context.pop("session_project_dir", None)
     if not isinstance(raw_value, str) or not raw_value.strip():
-        return chat
+        return chat, None
+
+    if request is not None:
+        denial = guarded_mutation_denial(
+            request,
+            route=route,
+            reason="session_project_dir_requires_privileged_role",
+        )
+        if denial is not None:
+            return chat, denial
 
     def _resolve_target() -> Path:
         target = Path(raw_value).expanduser().resolve()
@@ -164,13 +209,14 @@ async def _apply_session_project_dir(
         chat.id,
         str(target),
     )
-    return updated or chat
+    return (updated or chat), None
 
 
 def _extract_session_and_payload(
     request_data: Union[AgentRequest, dict],
     acl_sender_id: str = "",
     acl_roles: Optional[list] = None,
+    request_principal: Optional[RequestPrincipal] = None,
 ):
     """Extract run_key (ChatSpec.id), session_id, and native payload.
 
@@ -225,10 +271,21 @@ def _extract_session_and_payload(
         "user_id": sender_id,
     }
 
-    # Preserve request_context (e.g. session-level approval_level)
+    # Preserve request_context (e.g. session-level approval_level). The
+    # client may never forge an identity: reserved principal keys are
+    # always stripped from the client copy. Only the server-supplied
+    # request_principal may write acl_principal into channel meta.
     rc = _read_request_field(request_data, "request_context")
     if isinstance(rc, dict) and rc:
-        meta["request_context"] = rc
+        client_context = {
+            key: value
+            for key, value in rc.items()
+            if key not in _RESERVED_PRINCIPAL_KEYS
+        }
+        if client_context:
+            meta["request_context"] = client_context
+    if request_principal is not None:
+        meta["acl_principal"] = request_principal.to_context()
 
     native_payload: dict = {
         "channel_id": channel_id,
@@ -256,12 +313,14 @@ async def _extract_authenticated_session_and_payload(
     chat_manager: ChatManager,
     acl_sender_id: str = "",
     acl_roles: Optional[list] = None,
+    request_principal: Optional[RequestPrincipal] = None,
 ) -> dict:
     """Build a console payload with a trusted authenticated user identity."""
     native_payload = _extract_session_and_payload(
         request_data,
         acl_sender_id=acl_sender_id,
         acl_roles=acl_roles,
+        request_principal=request_principal,
     )
     if not acl_sender_id or native_payload["channel_id"] != "console":
         return native_payload
@@ -345,6 +404,7 @@ def _tail_text_file(
     description="Agent API Request Format. See runtime.agentscope.io. "
     "Use body.reconnect=true to attach to a running stream.",
 )
+@api_capability(RouteCapability.CHAT)
 async def post_console_chat(
     request_data: Union[AgentRequest, dict],
     request: Request,
@@ -364,12 +424,18 @@ async def post_console_chat(
     # which leaves the console ungated.
     acl_sender_id = getattr(request.state, "user", "") or ""
     acl_roles = getattr(request.state, "user_roles", None) or []
+    request_principal = getattr(
+        request.state,
+        "request_principal",
+        None,
+    )
     try:
         native_payload = await _extract_authenticated_session_and_payload(
             request_data,
             chat_manager=workspace.chat_manager,
             acl_sender_id=acl_sender_id,
             acl_roles=acl_roles,
+            request_principal=request_principal,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
@@ -387,10 +453,21 @@ async def post_console_chat(
         name=name,
     )
     tracker = workspace.task_tracker
+    requester_id = _guarded_requester_id(request)
+
     is_reconnect = _is_reconnect_request(request_data)
 
     if is_reconnect:
-        queue = await tracker.attach(chat.id)
+        try:
+            queue = await tracker.attach(
+                chat.id,
+                requester_id=requester_id,
+            )
+        except RunOwnershipError as exc:
+            raise HTTPException(
+                status_code=403,
+                detail="Run access denied",
+            ) from exc
         if queue is None:
             # The run finished (or never existed): reply with an
             # immediately-terminated SSE stream so the client's reader
@@ -398,11 +475,15 @@ async def post_console_chat(
             # history. Returning a JSON null here left the chat blank.
             return _empty_sse_response()
     else:
-        chat = await _apply_session_project_dir(
+        chat, denial = await _apply_session_project_dir(
             workspace,
             chat,
             native_payload,
+            request=request,
+            route="POST /api/console/chat",
         )
+        if denial is not None:
+            return denial
         from ...config.config import load_agent_config
         from ...services.project_directory import (
             resolve_effective_project_dir,
@@ -426,8 +507,24 @@ async def post_console_chat(
         request_context["project_dir_source"] = project_source
         native_payload["meta"]["request_context"] = request_context
 
-        # Title generation is only needed when starting a new run.
-        if first_text and chat.name == name:
+        try:
+            queue, is_new_run = await tracker.attach_or_start(
+                chat.id,
+                native_payload,
+                console_channel.stream_one,
+                owner_id=acl_sender_id,
+                requester_id=requester_id,
+                owner=workspace,
+            )
+        except RunOwnershipError as exc:
+            raise HTTPException(
+                status_code=403,
+                detail="Run access denied",
+            ) from exc
+
+        # Only the caller that successfully starts this run may schedule the
+        # detached title write. Existing-run joins and reconnects never do.
+        if is_new_run and first_text and chat.name == name:
             asyncio.create_task(
                 generate_and_update_title(
                     workspace=workspace,
@@ -436,12 +533,6 @@ async def post_console_chat(
                     placeholder_name=name,
                 ),
             )
-        queue, _ = await tracker.attach_or_start(
-            chat.id,
-            native_payload,
-            console_channel.stream_one,
-            owner=workspace,
-        )
 
     async def event_generator() -> AsyncGenerator[str, None]:
         # Hold iterator so finally can aclose(); guarantees stream_from_queue's
@@ -472,6 +563,7 @@ async def post_console_chat(
     status_code=200,
     summary="Stop running console chat",
 )
+@api_capability(RouteCapability.CHAT)
 async def post_console_chat_stop(
     request: Request,
     chat_id: str = Query(..., description="Chat id (ChatSpec.id) to stop"),
@@ -480,11 +572,16 @@ async def post_console_chat_stop(
     logger.debug("[STOP API] Received stop request for chat_id=%s", chat_id)
     workspace = await get_agent_for_request(request)
 
+    requester_id = _guarded_requester_id(request)
+
     # Try to stop with the provided chat_id first
     logger.debug(
         "[STOP API] Got workspace, calling task_tracker.request_stop...",
     )
-    stopped = await workspace.task_tracker.request_stop(chat_id)
+    stopped = await workspace.task_tracker.request_stop(
+        chat_id,
+        requester_id=requester_id,
+    )
 
     # If not found, the chat_id might be a session_id (timestamp)
     # Try to resolve it to the actual chat UUID
@@ -498,6 +595,7 @@ async def post_console_chat_stop(
             resolved_chat_id = await chat_manager.get_chat_id_by_session(
                 session_id=chat_id,
                 channel="console",
+                user_id=requester_id,
             )
             if resolved_chat_id:
                 logger.debug(
@@ -507,6 +605,7 @@ async def post_console_chat_stop(
                 )
                 stopped = await workspace.task_tracker.request_stop(
                     resolved_chat_id,
+                    requester_id=requester_id,
                 )
 
     logger.debug(
@@ -669,6 +768,7 @@ async def get_inbox_events(
 
 
 @router.post("/inbox/read")
+@api_capability(RouteCapability.MUTATE)
 async def post_mark_inbox_read(payload: MarkInboxReadRequest):
     from ..inbox_store import mark_all_read, mark_read
 
@@ -803,10 +903,11 @@ async def _mark_background_fork_failed(
     status_code=200,
     summary="Submit a background chat task",
 )
+@api_capability(RouteCapability.CHAT)
 async def post_console_chat_task(  # pylint: disable=too-many-statements
     request_data: dict,
     request: Request,
-) -> dict:
+) -> Any:
     """Run an agent chat as a background task.
 
     Accepts a raw JSON object (not the shared ``AgentRequest`` model) so
@@ -817,6 +918,24 @@ async def post_console_chat_task(  # pylint: disable=too-many-statements
     Returns a ``task_id`` immediately. Poll status via
     ``GET /console/chat/task/{task_id}``.
     """
+    request_context = _read_request_field(request_data, "request_context")
+    fork_context_requested = isinstance(request_context, dict) and any(
+        request_context.get(key) not in (None, "", False)
+        for key in (
+            "fork_project_dir",
+            "fork_worktree_branch",
+            "fork_scope_id",
+        )
+    )
+    if fork_context_requested:
+        denial = guarded_mutation_denial(
+            request,
+            route="POST /api/console/chat/task",
+            reason="fork_context_requires_privileged_role",
+        )
+        if denial is not None:
+            return denial
+
     workspace = await get_agent_for_request(request)
     console_channel = await workspace.channel_manager.get_channel("console")
     if console_channel is None:
@@ -836,12 +955,18 @@ async def post_console_chat_task(  # pylint: disable=too-many-statements
     task_id = f"task-{uuid.uuid4().hex[:12]}"
     acl_sender_id = getattr(request.state, "user", "") or ""
     acl_roles = getattr(request.state, "user_roles", None) or []
+    request_principal = getattr(
+        request.state,
+        "request_principal",
+        None,
+    )
     try:
         native_payload = await _extract_authenticated_session_and_payload(
             request_data,
             chat_manager=workspace.chat_manager,
             acl_sender_id=acl_sender_id,
             acl_roles=acl_roles,
+            request_principal=request_principal,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
@@ -856,11 +981,15 @@ async def post_console_chat_task(  # pylint: disable=too-many-statements
         native_payload["channel_id"],
         name=name,
     )
-    chat = await _apply_session_project_dir(
+    chat, denial = await _apply_session_project_dir(
         workspace,
         chat,
         native_payload,
+        request=request,
+        route="POST /api/console/chat/task",
     )
+    if denial is not None:
+        return denial
 
     fork_project_dir = ""
     fork_worktree_branch = ""
@@ -902,6 +1031,7 @@ async def post_console_chat_task(  # pylint: disable=too-many-statements
     bg = _BackgroundTask(
         status="running",
         started_at=time.time(),
+        owner_id=acl_sender_id,
     )
     timed_out = False
 
@@ -1036,11 +1166,18 @@ async def post_console_chat_task(  # pylint: disable=too-many-statements
     status_code=200,
     summary="Check background chat task status",
 )
-async def get_console_chat_task(task_id: str) -> dict:
+@api_capability(RouteCapability.READ)
+async def get_console_chat_task(task_id: str, request: Request) -> dict:
     """Return the current status of a background chat task."""
     async with _bg_lock:
         bg = _bg_tasks.get(task_id)
     if bg is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Task not found: {task_id}",
+        )
+    requester_id = _guarded_requester_id(request)
+    if requester_id is not None and bg.owner_id != requester_id:
         raise HTTPException(
             status_code=404,
             detail=f"Task not found: {task_id}",

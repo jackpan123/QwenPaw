@@ -13,6 +13,7 @@ from ...token_usage import get_token_usage_manager
 
 @tool_descriptor(
     async_execution=True,
+    side_effect="read",
     tool_type="internal",
     policy_name="GetTokenUsage",
     ui_description="Get llm token usage",

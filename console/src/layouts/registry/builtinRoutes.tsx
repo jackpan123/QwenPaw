@@ -69,12 +69,27 @@ function ACPRedirect() {
 }
 
 export const BUILTIN_ROUTES: Route[] = [
-  { id: "core.root", path: "/", component: DefaultRedirect },
-  { id: "core.chat", path: "/chat/*", component: Chat },
+  {
+    id: "core.root",
+    path: "/",
+    component: DefaultRedirect,
+    capability: "read",
+  },
+  {
+    id: "core.chat",
+    path: "/chat/*",
+    component: Chat,
+    capability: "read",
+  },
   { id: "core.files", path: "/files", component: FilesPage },
   { id: "core.channels", path: "/channels", component: ChannelsPage },
   { id: "core.sessions", path: "/sessions", component: SessionsPage },
-  { id: "core.inbox", path: "/inbox", component: InboxPage },
+  {
+    id: "core.inbox",
+    path: "/inbox",
+    component: InboxPage,
+    capability: "read",
+  },
   { id: "core.cron-jobs", path: "/cron-jobs", component: CronJobsPage },
   { id: "core.heartbeat", path: "/heartbeat", component: HeartbeatPage },
   { id: "core.skills", path: "/skills", component: SkillsPage },
@@ -102,14 +117,29 @@ export const BUILTIN_ROUTES: Route[] = [
     component: AgentConfigPage,
   },
   { id: "core.security", path: "/security", component: SecurityPage },
-  { id: "core.token-usage", path: "/token-usage", component: TokenUsagePage },
-  { id: "core.agent-stats", path: "/agent-stats", component: AgentStatsPage },
+  {
+    id: "core.token-usage",
+    path: "/token-usage",
+    component: TokenUsagePage,
+    capability: "read",
+  },
+  {
+    id: "core.agent-stats",
+    path: "/agent-stats",
+    component: AgentStatsPage,
+    capability: "read",
+  },
   {
     id: "core.voice-transcription",
     path: "/voice-transcription",
     component: VoiceTranscriptionPage,
   },
-  { id: "core.debug", path: "/debug", component: DebugPage },
+  {
+    id: "core.debug",
+    path: "/debug",
+    component: DebugPage,
+    capability: "read",
+  },
   { id: "core.backups", path: "/backups", component: BackupsPage },
   {
     id: "core.plugin-manager",

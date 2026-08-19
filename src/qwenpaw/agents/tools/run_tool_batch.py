@@ -16,7 +16,7 @@ from typing import Any
 
 from agentscope.message import TextBlock
 from agentscope.message import ToolResultState
-from agentscope.tool import ToolChunk
+from agentscope.tool import ToolChunk, ToolResponse
 
 from ...config.context import get_current_agent_state, get_current_toolkit
 from ...runtime.tool_registry import tool_descriptor
@@ -95,8 +95,8 @@ def _json_tool_response(payload: dict[str, Any]) -> ToolChunk:
     )
 
 
-def _extract_text(response: ToolChunk) -> str:
-    """Extract text from the first TextBlock in a ToolChunk.
+def _extract_text(response: ToolChunk | ToolResponse) -> str:
+    """Extract text from the first TextBlock in a tool result.
 
     Some tools (``view_image``, ``send_file``, etc.) return an
     ``ImageBlock`` / ``FileBlock`` / ``VideoBlock`` before the
@@ -159,8 +159,10 @@ def _extract_files_info(blocks: list[Any]) -> list[dict[str, str]]:
     return files
 
 
-def _response_payload(response: ToolChunk) -> dict[str, Any]:
-    """Convert a ToolChunk into a normalised result dict.
+def _response_payload(
+    response: ToolChunk | ToolResponse,
+) -> dict[str, Any]:
+    """Convert a streamed or final tool response to a result dict.
 
     The ``ok`` field is inferred from:
     - The response ``state`` (ERROR / DENIED → not ok).
@@ -586,13 +588,15 @@ def _lookup_arg(path: str, args: dict[str, Any]) -> Any:
 async def _call_tool(
     tool_name: str,
     arguments: dict[str, Any],
-) -> ToolChunk:
+) -> ToolChunk | ToolResponse:
     """Call a registered tool function by name via the current Toolkit.
 
-    Uses ``Toolkit.call_tool`` so that permission checking (including
-    ``PolicyGuardedTool.check_permissions``), tool-group activation
-    guards, and state injection all apply — the same pipeline as a
-    normal agent tool call.
+    Runs AgentScope's permission engine explicitly before
+    ``Toolkit.call_tool``. The toolkit handles availability, state injection,
+    and raw execution, but does not call a tool's ``check_permissions`` on
+    its own. The explicit precheck preserves QwenPaw governance, approval,
+    and sandbox preparation for nested batch calls; the wrapper's final
+    execution boundary still rechecks the role immediately before execution.
     """
     from agentscope.message import ToolCallBlock
 
@@ -619,7 +623,25 @@ async def _call_tool(
 
     tool_stream = None
     try:
-        response: ToolChunk | None = None
+        from agentscope.permission import (
+            PermissionBehavior,
+            PermissionEngine,
+        )
+
+        tool = await toolkit.check_tool_available(
+            tool_name,
+            agent_state.tool_context.activated_groups,
+        )
+        decision = await PermissionEngine(
+            agent_state.permission_context,
+        ).check_permission(tool, arguments)
+        if decision.behavior is not PermissionBehavior.ALLOW:
+            return ToolChunk(
+                state=ToolResultState.DENIED,
+                content=[TextBlock(type="text", text=decision.message)],
+            )
+
+        response: ToolChunk | ToolResponse | None = None
         tool_stream = toolkit.call_tool(tool_call, agent_state)
         async for chunk in tool_stream:
             response = chunk
@@ -1099,6 +1121,7 @@ def _validate_maxstep(maxstep: int) -> int:
 
 @tool_descriptor(
     async_execution=True,
+    side_effect="read",
     tool_type="internal",
     policy_name="RunToolBatch",
 )

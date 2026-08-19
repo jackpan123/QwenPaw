@@ -28,8 +28,8 @@ export interface ApprovalCardProps {
   isGeneralized?: boolean;
   exactTarget?: string;
   similarTarget?: string;
-  onApprove: (requestId: string, scope?: "exact" | "similar") => Promise<void>;
-  onDeny: (requestId: string) => Promise<void>;
+  onApprove?: (requestId: string, scope?: "exact" | "similar") => Promise<void>;
+  onDeny?: (requestId: string) => Promise<void>;
   onCancel?: () => void;
   onAcknowledge?: (requestId: string) => Promise<void>;
 }
@@ -54,7 +54,6 @@ export function ApprovalCard({
   similarTarget,
   onApprove,
   onDeny,
-  onCancel: _onCancel,
   onAcknowledge,
 }: ApprovalCardProps) {
   const { t } = useTranslation();
@@ -121,6 +120,7 @@ export function ApprovalCard({
   }, [createdAt, timeoutSeconds]);
 
   const handleApprove = async (scope?: "exact" | "similar") => {
+    if (!onApprove) return;
     const loadingKey =
       scope === "similar" ? "approve-pattern" : "approve-exact";
     console.log(
@@ -141,6 +141,7 @@ export function ApprovalCard({
   };
 
   const handleDeny = async () => {
+    if (!onDeny) return;
     setLoading("deny");
     try {
       await onDeny(requestId);
@@ -335,25 +336,25 @@ export function ApprovalCard({
         )}
       </div>
 
-      <div className={styles.actions}>
-        {isTimedOut ? (
-          <>
-            <Text className={styles.timeoutHint}>
-              {t("approval.timeoutAutoDenied", "Timed out, auto denied")}
-            </Text>
-            {onAcknowledge ? (
-              <Button
-                type="primary"
-                onClick={handleAcknowledge}
-                loading={loading === "acknowledge"}
-                disabled={loading !== null}
-              >
-                {t("approval.acknowledge", "Got It")}
-              </Button>
-            ) : null}
-          </>
-        ) : (
-          <>
+      {isTimedOut ? (
+        <div className={styles.actions}>
+          <Text className={styles.timeoutHint}>
+            {t("approval.timeoutAutoDenied", "Timed out, auto denied")}
+          </Text>
+          {onAcknowledge ? (
+            <Button
+              type="primary"
+              onClick={handleAcknowledge}
+              loading={loading === "acknowledge"}
+              disabled={loading !== null}
+            >
+              {t("approval.acknowledge", "Got It")}
+            </Button>
+          ) : null}
+        </div>
+      ) : onApprove || onDeny ? (
+        <div className={styles.actions}>
+          {onDeny ? (
             <Button
               danger
               icon={<X size={14} />}
@@ -364,55 +365,55 @@ export function ApprovalCard({
             >
               {t("approval.deny", "Deny")}
             </Button>
-            {isGeneralized ? (
-              <>
-                <Button
-                  type="primary"
-                  icon={<Check size={14} />}
-                  onClick={() => handleApprove("exact")}
-                  loading={loading === "approve-exact"}
-                  disabled={loading !== null}
-                  className={styles.approveOnceButton}
-                >
-                  {t("approval.approveExact", "Just Once")}
-                </Button>
-                <Tooltip
-                  title={
-                    isAlwaysAllowDisabled
-                      ? t(
-                          "approval.alwaysAllowDisabledHint",
-                          "Always allow is unavailable for this approval source",
-                        )
-                      : undefined
-                  }
-                >
-                  <Button
-                    onClick={() => handleApprove("similar")}
-                    loading={loading === "approve-pattern"}
-                    disabled={isAlwaysAllowDisabled || loading !== null}
-                    className={styles.approveAlwaysButton}
-                  >
-                    {t("approval.approvePattern", "Always Allow")}
-                  </Button>
-                </Tooltip>
-              </>
-            ) : (
+          ) : null}
+          {onApprove && isGeneralized ? (
+            <>
               <Button
                 type="primary"
                 icon={<Check size={14} />}
-                onClick={() => handleApprove()}
-                loading={
-                  loading === "approve-exact" || loading === "approve-pattern"
-                }
+                onClick={() => handleApprove("exact")}
+                loading={loading === "approve-exact"}
                 disabled={loading !== null}
                 className={styles.approveOnceButton}
               >
-                {t("approval.approve", "Approve")}
+                {t("approval.approveExact", "Just Once")}
               </Button>
-            )}
-          </>
-        )}
-      </div>
+              <Tooltip
+                title={
+                  isAlwaysAllowDisabled
+                    ? t(
+                        "approval.alwaysAllowDisabledHint",
+                        "Always allow is unavailable for this approval source",
+                      )
+                    : undefined
+                }
+              >
+                <Button
+                  onClick={() => handleApprove("similar")}
+                  loading={loading === "approve-pattern"}
+                  disabled={isAlwaysAllowDisabled || loading !== null}
+                  className={styles.approveAlwaysButton}
+                >
+                  {t("approval.approvePattern", "Always Allow")}
+                </Button>
+              </Tooltip>
+            </>
+          ) : onApprove ? (
+            <Button
+              type="primary"
+              icon={<Check size={14} />}
+              onClick={() => handleApprove()}
+              loading={
+                loading === "approve-exact" || loading === "approve-pattern"
+              }
+              disabled={loading !== null}
+              className={styles.approveOnceButton}
+            >
+              {t("approval.approve", "Approve")}
+            </Button>
+          ) : null}
+        </div>
+      ) : null}
     </Card>
   );
 }

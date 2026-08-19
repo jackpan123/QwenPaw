@@ -214,6 +214,7 @@ class CodingModeMixin:
             return []
 
         from ...governance import PolicyGuardedTool
+        from ...runtime.tool_registry import get_tool_effect_spec
 
         governor = getattr(self, "_governor", None)
         project_dir = Path(
@@ -225,11 +226,13 @@ class CodingModeMixin:
         try:
             available = detect_available_lsp_languages(project_dir)
             if available:
+                lsp_tool = make_lsp_tool(available)
                 result.append(
                     PolicyGuardedTool(
-                        make_lsp_tool(available),
+                        lsp_tool,
                         governor=governor,
                         request_context=request_context,
+                        effect_spec=get_tool_effect_spec(lsp_tool),
                     ),
                 )
                 logger.info(
@@ -252,6 +255,7 @@ class CodingModeMixin:
                         ast_tool.ast_search,
                         governor=governor,
                         request_context=request_context,
+                        effect_spec=get_tool_effect_spec(ast_tool.ast_search),
                     ),
                 )
                 logger.info("Registered Coding Mode ast_search tool")
@@ -278,6 +282,7 @@ def collect_coding_tools(
     that ``AgentBuilder`` previously used.
     """
     from ...governance import PolicyGuardedTool
+    from ...runtime.tool_registry import get_tool_effect_spec
 
     cm = getattr(agent_config, "coding_mode", None)
     if cm is None or not getattr(cm, "enabled", False):
@@ -292,11 +297,13 @@ def collect_coding_tools(
     try:
         available = detect_available_lsp_languages(project_dir)
         if available:
+            lsp_tool = make_lsp_tool(available)
             result.append(
                 PolicyGuardedTool(
-                    make_lsp_tool(available),
+                    lsp_tool,
                     governor=governor,
                     request_context=request_context,
+                    effect_spec=get_tool_effect_spec(lsp_tool),
                 ),
             )
             logger.info(
@@ -313,6 +320,7 @@ def collect_coding_tools(
                     ast_tool.ast_search,
                     governor=governor,
                     request_context=request_context,
+                    effect_spec=get_tool_effect_spec(ast_tool.ast_search),
                 ),
             )
             logger.info("Registered Coding Mode ast_search tool")

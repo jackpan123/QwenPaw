@@ -46,7 +46,6 @@ from ..base import (
 )
 from ..utils import file_url_to_local_path
 
-
 logger = logging.getLogger(__name__)
 
 # ANSI colour helpers (degrade gracefully if not a tty)

@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os
@@ -13,7 +14,7 @@ import sys
 import threading
 import uuid
 from pathlib import Path
-from typing import Any, Optional, Tuple
+from typing import Any, Callable, Optional, Tuple
 
 from json_repair import repair_json
 
@@ -28,6 +29,7 @@ from ..constant import (
     WORKING_DIR,
     EnvVarLoader,
 )
+from ..utils.io_utils import get_sync_path_lock, write_json_atomic
 from .config import (
     Config,
     HeartbeatConfig,
@@ -43,6 +45,7 @@ logger = logging.getLogger(__name__)
 # Config cache with mtime tracking for reducing disk IO
 _config_cache: Optional[Config] = None
 _config_mtime: Optional[float] = None
+_config_cache_path: Optional[Path] = None
 _config_lock = threading.RLock()
 
 # Agent config cache: {agent_id: (config, mtime)}
@@ -602,10 +605,11 @@ def load_config(config_path: Optional[Path] = None) -> Config:
     Uses file modification time to avoid unnecessary disk reads.
     Returns default Config if file is missing.
     """
-    global _config_cache, _config_mtime
+    global _config_cache, _config_mtime, _config_cache_path
 
     if config_path is None:
         config_path = get_config_path()
+    config_path = config_path.expanduser().resolve()
 
     if not config_path.is_file():
         return Config()
@@ -621,6 +625,7 @@ def load_config(config_path: Optional[Path] = None) -> Config:
         if (
             _config_cache is not None
             and _config_mtime is not None
+            and _config_cache_path == config_path
             and _config_mtime == current_mtime
         ):
             return _config_cache
@@ -633,6 +638,7 @@ def load_config(config_path: Optional[Path] = None) -> Config:
             config = _load_and_validate_config(config_path, data)
 
         _config_cache = config
+        _config_cache_path = config_path
         try:
             _config_mtime = config_path.stat().st_mtime
         except OSError:
@@ -681,24 +687,143 @@ def strict_validate_config_file(
 
 
 def save_config(config: Config, config_path: Optional[Path] = None) -> None:
-    """Save the config to the file and invalidate cache."""
-    global _config_cache, _config_mtime
+    """Atomically save a complete config and invalidate the root cache.
+
+    This compatibility API serializes with transactional writers, but callers
+    performing a concurrent read-modify-write sequence should use
+    :func:`update_config_transaction` so their initial read is also protected.
+    """
+    global _config_cache, _config_mtime, _config_cache_path
 
     if config_path is None:
         config_path = get_config_path()
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(config_path, "w", encoding="utf-8") as file:
-        json.dump(
+    config_path = config_path.expanduser().resolve()
+    with get_sync_path_lock(config_path):
+        validated = Config.model_validate(
             config.model_dump(mode="json", by_alias=True),
-            file,
-            indent=2,
-            ensure_ascii=False,
         )
+        write_json_atomic(
+            config_path,
+            validated.model_dump(mode="json", by_alias=True),
+        )
+        with _config_lock:
+            _config_cache = None
+            _config_mtime = None
+            _config_cache_path = None
 
-    # Invalidate cache after saving
-    with _config_lock:
-        _config_cache = None
-        _config_mtime = None
+
+def replace_config_transaction(
+    raw_config: dict[str, Any],
+    config_path: Optional[Path] = None,
+) -> Config:
+    """Validate and atomically replace root config without dropping fields.
+
+    Validation protects the runtime from malformed known configuration while
+    the original JSON object remains the write payload. This preserves
+    unknown fields from newer QwenPaw versions during a full backup restore.
+    The shared cache is invalidated only after the atomic replacement
+    succeeds.
+    """
+    global _config_cache, _config_mtime, _config_cache_path
+
+    if config_path is None:
+        config_path = get_config_path()
+    config_path = config_path.expanduser().resolve()
+
+    with get_sync_path_lock(config_path):
+        validated = Config.model_validate(raw_config)
+        write_json_atomic(config_path, raw_config)
+        with _config_lock:
+            _config_cache = None
+            _config_mtime = None
+            _config_cache_path = None
+        return validated
+
+
+def update_raw_config_transaction(
+    mutate: Callable[[dict[str, Any]], None],
+    config_path: Optional[Path] = None,
+) -> Config:
+    """Atomically mutate root config while preserving unknown JSON fields.
+
+    The path lock covers the strict raw read, deep copy, mutation, validation,
+    and atomic replacement. ``Config`` validates every known field after the
+    callback, but the validated model is not serialized, so forward-compatible
+    unknown fields remain intact. Failed callbacks, validation, or writes leave
+    both disk and the shared runtime cache unchanged.
+    """
+    global _config_cache, _config_mtime, _config_cache_path
+
+    if config_path is None:
+        config_path = get_config_path()
+    config_path = config_path.expanduser().resolve()
+
+    with get_sync_path_lock(config_path):
+        if config_path.is_file():
+            with open(config_path, "r", encoding="utf-8") as file:
+                current = json.load(file)
+            if not isinstance(current, dict):
+                raise ValueError("Root config must be a JSON object")
+        else:
+            current = Config().model_dump(mode="json", by_alias=True)
+
+        updated = copy.deepcopy(current)
+        mutate(updated)
+        validated = Config.model_validate(updated)
+        if updated == current:
+            return validated
+
+        write_json_atomic(config_path, updated)
+        with _config_lock:
+            _config_cache = None
+            _config_mtime = None
+            _config_cache_path = None
+        return validated
+
+
+def update_config_transaction(
+    mutate: Callable[[Config], None],
+    config_path: Optional[Path] = None,
+) -> Config:
+    """Atomically apply one synchronous update to the root config.
+
+    The path lock covers the complete load, deep-copy, mutation, and atomic
+    replacement transaction. This process-local lock is sufficient for the
+    application's supported single-worker model; it is not a multi-process
+    file lock.
+
+    ``load_config`` may return its shared cached model, so callers receive a
+    deep copy to mutate. The shared cache is invalidated only after the new
+    file has been replaced successfully. A serialization or write failure
+    therefore leaves both the on-disk config and the live cached model
+    unchanged.
+    """
+    global _config_cache, _config_mtime, _config_cache_path
+
+    if config_path is None:
+        config_path = get_config_path()
+    config_path = config_path.expanduser().resolve()
+
+    with get_sync_path_lock(config_path):
+        current = load_config(config_path)
+        original_dump = current.model_dump(mode="json", by_alias=True)
+        updated = current.model_copy(deep=True)
+        mutate(updated)
+        validated = Config.model_validate(
+            updated.model_dump(mode="json", by_alias=True),
+        )
+        validated_dump = validated.model_dump(mode="json", by_alias=True)
+        if validated_dump == original_dump:
+            return validated
+        write_json_atomic(
+            config_path,
+            validated_dump,
+        )
+        with _config_lock:
+            _config_cache = None
+            _config_mtime = None
+            _config_cache_path = None
+        return validated
 
 
 def get_heartbeat_config(agent_id: Optional[str] = None) -> HeartbeatConfig:
@@ -755,13 +880,14 @@ def update_last_dispatch(
             pass
 
     # Legacy: update root config
-    config = load_config()
-    config.last_dispatch = LastDispatchConfig(
-        channel=channel,
-        user_id=user_id,
-        session_id=session_id,
-    )
-    save_config(config)
+    def update(config: Config) -> None:
+        config.last_dispatch = LastDispatchConfig(
+            channel=channel,
+            user_id=user_id,
+            session_id=session_id,
+        )
+
+    update_config_transaction(update)
 
 
 # In-process cache for the current server's API address.
@@ -806,11 +932,12 @@ def read_last_api() -> Optional[Tuple[str, int]]:
 def write_last_api(host: str, port: int) -> None:
     """Write last API host/port to both in-process cache and config file."""
     global _runtime_last_api
-    _runtime_last_api = (host, port)
 
-    config = load_config()
-    config.last_api = LastApiConfig(host=host, port=port)
-    save_config(config)
+    def update(config: Config) -> None:
+        config.last_api = LastApiConfig(host=host, port=port)
+
+    update_config_transaction(update)
+    _runtime_last_api = (host, port)
 
 
 def get_jobs_path() -> Path:

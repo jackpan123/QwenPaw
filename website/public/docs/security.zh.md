@@ -4,7 +4,7 @@ QwenPaw 内置了安全功能，保护你的 Agent 在运行过程中产生的�
 
 ## 概述
 
-QwenPaw 的安全系统由五个核心安全层组成:
+QwenPaw 的安全系统由六个核心安全层组成:
 
 ```
 安全架构:
@@ -21,9 +21,12 @@ QwenPaw 的安全系统由五个核心安全层组成:
 ├─ 技能扫描器 (Skill Scanner) — 技能安全预检
 │  在技能启用前扫描恶意代码、硬编码密钥和安全威胁
 │
-└─ 访问策略 (Access Policy) — 声明式访问策略
-   控制谁可以在什么条件下调用哪些能力
-   支持工具级粒度和来源感知规则
+├─ 访问策略 (Access Policy) — 声明式访问策略
+│  控制谁可以在什么条件下调用哪些能力
+│  支持工具级粒度和来源感知规则
+│
+└─ 变更守卫 (Mutation Guard) — 基于 NocoBase 角色的变更权限
+   允许普通成员聊天和只读操作，阻止持久化变更与外部副作用
 ```
 
 **附加功能**: Web 登录认证 — 为控制台提供可选的身份验证保护
@@ -35,7 +38,140 @@ QwenPaw 的安全系统由五个核心安全层组成:
 - **沙箱隔离** 在操作系统内核强制的隔离边界内执行 Shell 命令，将文件系统访问限制为仅已声明的路径
 - **技能扫描器** 在技能启用前运行，检测恶意代码和安全威胁
 - **访问策略** 对每次能力调用评估其来源、身份和目标——最终决定放行(allow)、拒绝(deny)或请求人工审批(ask)
+- **变更守卫** 根据 NocoBase 实时返回的角色，限制普通成员执行持久化变更和外部副作用
 - **Web 登录认证** (可选) 控制对控制台界面的访问
+
+---
+
+## 变更守卫
+
+**变更守卫（Mutation Guard）**用于把已认证的 NocoBase 用户分为可执行变更的特权角色和只读成员。它不影响普通问答，而是在 Agent 将要改变持久状态或外部状态时执行角色授权。
+
+### 身份、角色与权限
+
+- Token 由 NocoBase 验证。QwenPaw 使用调用者自己的 NocoBase 用户 token 请求 `GET /api/auth:check?appends=roles`，并从该响应读取当前角色；不信任请求体、查询参数或自定义角色请求头中的角色声明。成功的身份结果会短暂缓存约 60 秒。
+- 默认特权角色为 `admin` 和 `root`。匹配规则是**忽略大小写的精确匹配**：`Admin` 匹配 `admin`，`administrator` 不匹配 `admin`。用户拥有任意一个特权角色即可执行变更。
+- `member` 等非特权角色可以聊天、查询数据，以及索要教程、说明、代码片段和配置示例；但不能让 Agent 实际改名、写入记忆、创建/修改/删除文件、修改 QwenPaw 配置、发送外部消息、提交表单或调用写 API。
+- 意图分类器仅是提前给出友好拒绝的 **UX 预检**。真正的安全边界是执行路径上的 HTTP 路由、action effect、tool、driver 和 command gates；即使分类器超时、失败或把请求判为模糊，这些闸门仍会阻止非特权成员执行变更。
+- 只有同时启用 QwenPaw 认证和变更守卫、且身份来源为 NocoBase 时，角色闸门才生效。`QWENPAW_AUTH_ENABLED` 关闭时，本地/未认证操作不会启用这道 NocoBase 角色闸门；命中 `security.allow_no_auth_hosts` 的本地请求同样会跳过认证和角色闸门。
+
+这里使用的是每位调用者自己的 NocoBase 用户 token，不是插件配置中的 `QWENPAW_NOCOBASE_API_TOKEN`。普通成员、`admin` 和 `root` 都使用自己的用户 token；插件 `api_token` 只用于用户/角色管理视图。
+
+### 配置
+
+在控制台 **设置 → 安全 → Mutation Guard** 中管理，也可编辑 `config.json` 的 `security.mutation_guard`。下面是 `config.json` 中的嵌套结构：
+
+```json
+{
+  "security": {
+    "mutation_guard": {
+      "enabled": true,
+      "privileged_roles": ["admin", "root"],
+      "intent_precheck_enabled": true,
+      "classifier_timeout_seconds": 8,
+      "deny_message": "当前账号没有执行变更操作的权限。你仍然可以询问相关操作方法或获取示例。"
+    }
+  }
+}
+```
+
+`GET /api/config/security/mutation-guard` 返回平铺的守卫对象；`PUT` 必须原样提交这种平铺结构，**不能**包含 `security.mutation_guard` 外壳：
+
+```json
+{
+  "enabled": true,
+  "privileged_roles": ["admin", "root"],
+  "intent_precheck_enabled": true,
+  "classifier_timeout_seconds": 8,
+  "deny_message": "当前账号没有执行变更操作的权限。你仍然可以询问相关操作方法或获取示例。"
+}
+```
+
+| 字段                         | 默认值                                                                   | 说明                                                                                       |
+| ---------------------------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------ |
+| `enabled`                    | `true`                                                                   | 启用角色变更闸门。关闭后不再按 NocoBase 角色限制变更。                                     |
+| `privileged_roles`           | `["admin", "root"]`                                                      | 可以执行变更的 NocoBase 角色；至少保留一个非空值，保存时会去空格、转小写并去重。           |
+| `intent_precheck_enabled`    | `true`                                                                   | 启用聊天意图 UX 预检；关闭它不会关闭执行路径上的安全闸门。                                 |
+| `classifier_timeout_seconds` | `8`                                                                      | 意图分类超时秒数，必须是 `1`–`60` 的整数。                                                 |
+| `deny_message`               | `当前账号没有执行变更操作的权限。你仍然可以询问相关操作方法或获取示例。` | 聊天预检和工具拒绝使用的用户提示；HTTP 403 的 `detail` 取其第一行/第一个中文句号前的内容。 |
+
+### 拒绝响应
+
+非特权成员直接调用写接口时会在处理函数运行前收到 `403`。`code` 是稳定的机器可读值，`detail` 来自配置的 `deny_message`；默认响应为：
+
+```http
+HTTP/1.1 403 Forbidden
+Content-Type: application/json
+
+{"detail":"当前账号没有执行变更操作的权限","code":"mutation_permission_denied"}
+```
+
+聊天接口本身是 `CHAT` 能力，因此请求实际变更时保持 `200` 和 SSE 协议。当意图预检明确识别出变更请求时，它会短路 Agent，并在响应流中返回配置的拒绝文案。下面只保留 SSE 内容事件中的授权相关字段；`msg_id` 等动态字段已省略：
+
+```text
+data: {"object":"content","type":"text","text":"当前账号没有执行变更操作的权限。你仍然可以询问相关操作方法或获取示例。"}
+```
+
+若请求已进入工具执行路径，工具拒绝文本还会包含稳定标识 `mutation_permission_denied`。不要只依赖聊天文案判断权限；HTTP 客户端应检查状态码和 `code`，SSE 客户端应正常消费到完成事件并展示拒绝文本。
+
+### curl 验收
+
+以下命令应在测试实例中执行。先设置 `QWENPAW_AUTH_ENABLED=true`、启用 `nocobase-auth` 插件，并确保测试客户端 IP 不在 `security.allow_no_auth_hosts` 中；若从服务器本机执行，可暂时将该列表设为 `[]`。三个变量都是对应 NocoBase 用户登录后获得的**用户 token**，不是插件 `api_token`。先读取当前配置，后续 `PUT` 原样写回，避免改变自定义值：
+
+```bash
+export MEMBER_TOKEN='<member 用户 token>'
+export ADMIN_TOKEN='<拥有 admin 角色的用户 token>'
+export ROOT_TOKEN='<拥有 root 角色的用户 token>'
+
+curl -sS http://localhost:8088/api/config/security/mutation-guard \
+  -H "X-NocoBase-Token: $ADMIN_TOKEN" \
+  -o mutation-guard-current.json
+```
+
+1. `member` 可以读取配置，但不能写回；第二条命令应返回 `403` 和 `mutation_permission_denied`：
+
+```bash
+curl -i -sS http://localhost:8088/api/config/security/mutation-guard \
+  -H "X-NocoBase-Token: $MEMBER_TOKEN"
+
+curl -i -sS -X PUT \
+  http://localhost:8088/api/config/security/mutation-guard \
+  -H "X-NocoBase-Token: $MEMBER_TOKEN" \
+  -H "Content-Type: application/json" \
+  --data-binary @mutation-guard-current.json
+```
+
+2. `admin` 和 `root` 精确命中特权角色，原样写回应分别返回 `200`：
+
+```bash
+curl -i -sS -X PUT \
+  http://localhost:8088/api/config/security/mutation-guard \
+  -H "X-NocoBase-Token: $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  --data-binary @mutation-guard-current.json
+
+curl -i -sS -X PUT \
+  http://localhost:8088/api/config/security/mutation-guard \
+  -H "X-NocoBase-Token: $ROOT_TOKEN" \
+  -H "Content-Type: application/json" \
+  --data-binary @mutation-guard-current.json
+```
+
+3. `member` 请求教程会正常进入 Agent；请求实际改名时不得产生任何持久状态或外部状态变更：
+
+```bash
+curl -N -sS http://localhost:8088/api/console/chat \
+  -H "X-NocoBase-Token: $MEMBER_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"channel":"console","session_id":"mutation-guard-check","input":[{"role":"user","content":[{"type":"text","text":"请说明如何修改助手名称，并给出示例；不要实际修改"}]}]}'
+
+curl -N -sS http://localhost:8088/api/console/chat \
+  -H "X-NocoBase-Token: $MEMBER_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"channel":"console","session_id":"mutation-guard-check-rename","input":[{"role":"user","content":[{"type":"text","text":"现在把你的名字改成小明"}]}]}'
+```
+
+若意图分类器明确识别出第二条请求，会看到上述 SSE 预检拒绝文案。分类器超时、失败或返回模糊结果时，请求可能继续进入受只读约束的 Agent；此时仍应确认名称、记忆、文件和配置均未改变。若 Agent 尝试调用写工具，响应中还应出现 `mutation_permission_denied`。安全验收以**没有实际副作用**为准，而不是要求每次都出现同一条预检文案。
 
 ---
 
@@ -900,6 +1036,13 @@ policy:
       "mode": "warn",
       "timeout": 30,
       "whitelist": []
+    },
+    "mutation_guard": {
+      "enabled": true,
+      "privileged_roles": ["admin", "root"],
+      "intent_precheck_enabled": true,
+      "classifier_timeout_seconds": 8,
+      "deny_message": "当前账号没有执行变更操作的权限。你仍然可以询问相关操作方法或获取示例。"
     }
   }
 }
@@ -940,14 +1083,14 @@ QwenPaw 支持可选的 Web 登录认证,保护控制台免受未授权访问。
 
 ### 环境变量
 
-| 变量                             | 说明                                                                     | 是否必填 |
-| --------------------------------- | -------------------------------------------------------------------------- | -------- |
-| `QWENPAW_AUTH_ENABLED`           | 设为 `true` 启用认证                                                     | **是**   |
-| `QWENPAW_NOCOBASE_ENABLED`       | 设为 `true`/`1`/`yes` 启用 NocoBase 集成                                 | 可选     |
-| `QWENPAW_NOCOBASE_BASE_URL`      | NocoBase 实例地址(例如 `http://nocobase:13000`)                        | 可选     |
+| 变量                             | 说明                                                                                  | 是否必填 |
+| -------------------------------- | ------------------------------------------------------------------------------------- | -------- |
+| `QWENPAW_AUTH_ENABLED`           | 设为 `true` 启用认证                                                                  | **是**   |
+| `QWENPAW_NOCOBASE_ENABLED`       | 设为 `true`/`1`/`yes` 启用 NocoBase 集成                                              | 可选     |
+| `QWENPAW_NOCOBASE_BASE_URL`      | NocoBase 实例地址(例如 `http://nocobase:13000`)                                       | 可选     |
 | `QWENPAW_NOCOBASE_API_TOKEN`     | NocoBase 管理员 API Token——仅用于管理员的"用户/角色列表"页面,登录和访问门禁均不需要它 | 可选     |
-| `QWENPAW_NOCOBASE_USER_ID_FIELD` | 作为频道发送者标识使用的 NocoBase 用户字段(默认 `email`)                | 可选     |
-| `QWENPAW_NOCOBASE_AUTHENTICATOR` | 用于密码登录的 NocoBase 认证器名称(默认 `basic`)                        | 可选     |
+| `QWENPAW_NOCOBASE_USER_ID_FIELD` | 作为频道发送者标识使用的 NocoBase 用户字段(默认 `email`)                              | 可选     |
+| `QWENPAW_NOCOBASE_AUTHENTICATOR` | 用于密码登录的 NocoBase 认证器名称(默认 `basic`)                                      | 可选     |
 
 这些 `QWENPAW_NOCOBASE_*` 变量仅在 `~/.qwenpaw/nocobase_auth_config.json` 尚不存在时用于*首次播种*该文件。文件存在后,请改为在控制台插件管理页中管理连接信息(包括角色→频道映射)。
 
@@ -964,7 +1107,7 @@ QwenPaw 支持可选的 Web 登录认证,保护控制台免受未授权访问。
 ```
 
 | 字段                  | 类型          | 默认值                 | 说明                                                         |
-| --------------------- | ------------- | ----------------------- | ------------------------------------------------------------ |
+| --------------------- | ------------- | ---------------------- | ------------------------------------------------------------ |
 | `allow_no_auth_hosts` | array[string] | `["127.0.0.1", "::1"]` | 允许无需认证令牌即可访问 `/api/*` 路由的客户端 IP 地址列表。 |
 
 也可以在控制台 **设置 → 安全** 中管理。
@@ -1103,18 +1246,18 @@ docker exec -it <容器名> qwenpaw auth reset-password
 
 ### 安全细节
 
-| 特性           | 说明                                                                  |
-| -------------- | ----------------------------------------------------------------------- |
-| 账号存储       | 无——账号、密码和角色完全由 NocoBase 拥有                              |
-| 令牌格式       | 由 NocoBase 签发;格式和有效期由 NocoBase 的认证器配置决定             |
-| 令牌存储       | 浏览器 localStorage，退出登录或收到 401 响应时清除                    |
-| 连接密钥       | `QWENPAW_NOCOBASE_API_TOKEN` 在 `nocobase_auth_config.json` 中加密存储 |
-| 文件权限       | `nocobase_auth_config.json` 以 `0o600` 权限写入(仅所有者可读写)      |
-| 本地免认证     | 来自 `127.0.0.1` / `::1` 的请求跳过认证（CLI 访问不受影响）           |
-| CORS 预检      | `OPTIONS` 请求无需认证直接放行                                        |
-| WebSocket 认证 | 令牌通过查询参数传递，仅限升级请求                                    |
-| 受保护路由     | 仅 `/api/*` 路由需要认证                                              |
-| 公开路由       | `/api/auth/login`、`/api/auth/status`、`/api/version`、静态资源       |
+| 特性         | 说明                                                                                          |
+| ------------ | --------------------------------------------------------------------------------------------- |
+| 账号存储     | 无——账号、密码和角色完全由 NocoBase 拥有                                                      |
+| 令牌格式     | 由 NocoBase 签发;格式和有效期由 NocoBase 的认证器配置决定                                     |
+| 令牌存储     | 浏览器 localStorage，退出登录或收到 401 响应时清除                                            |
+| 连接密钥     | `QWENPAW_NOCOBASE_API_TOKEN` 在 `nocobase_auth_config.json` 中加密存储                        |
+| 文件权限     | `nocobase_auth_config.json` 以 `0o600` 权限写入(仅所有者可读写)                               |
+| 本地免认证   | 来自 `127.0.0.1` / `::1` 的请求跳过认证（CLI 访问不受影响）                                   |
+| CORS 预检    | `OPTIONS` 请求无需认证直接放行                                                                |
+| 查询参数令牌 | NocoBase resolver 对任意请求接受 `?token=`；更推荐使用请求头，避免令牌出现在 URL 和访问日志中 |
+| 受保护路由   | 除明确公开项外的 `/api/*`、`/cron`/`/crons` 管理路由，以及非 API 的写请求需要认证             |
+| 公开路由示例 | `/api/auth/login`、`/api/auth/status`、`/api/version`、静态资源；以服务端公开清单为准         |
 
 ---
 
@@ -1139,15 +1282,15 @@ POST /api/console/chat
 X-NocoBase-Token: <当前 NocoBase 用户的 token>
 ```
 
-> **注意**：请勿将 NocoBase token 放入 `Authorization` 头——那是 QwenPaw 自身 token 的位置。两条身份来源可共存，**QwenPaw 自身 token 优先**。
+> **注意**：也支持 `Authorization: Bearer <token>` 和用于 WebSocket/文件预览 URL 的 `?token=`。同时提供多个来源时，优先级为 `X-NocoBase-Token`、Bearer、查询参数。下面统一使用含义最明确的 `X-NocoBase-Token`。
 
 **curl 示例：**
 
 ```bash
-curl -X POST http://localhost:8088/api/console/chat \
+curl -N -X POST http://localhost:8088/api/console/chat \
   -H "X-NocoBase-Token: your-nocobase-token-here" \
   -H "Content-Type: application/json" \
-  -d '{"message": "你好"}'
+  -d '{"channel":"console","session_id":"sso-example","input":[{"role":"user","content":[{"type":"text","text":"你好"}]}]}'
 ```
 
 **fetch 示例：**
@@ -1159,15 +1302,25 @@ fetch("/api/console/chat", {
     "X-NocoBase-Token": nocobaseToken,
     "Content-Type": "application/json",
   },
-  body: JSON.stringify({ message: "你好" }),
+  body: JSON.stringify({
+    channel: "console",
+    session_id: "sso-example",
+    input: [
+      {
+        role: "user",
+        content: [{ type: "text", text: "你好" }],
+      },
+    ],
+  }),
 });
 ```
 
 #### 校验与准入
 
-1. QwenPaw 收到请求后，用 `X-NocoBase-Token` 调用 NocoBase `auth:check` 接口获取当前用户信息。
+1. QwenPaw 收到请求后，用调用者的 NocoBase token 请求 `GET /api/auth:check?appends=roles`，由 NocoBase 验证 token 并在同一响应中返回当前角色。
 2. 按 `user_id_field`（默认 `email`）提取用户标识。
 3. 将用户角色套用插件配置页维护的「角色 → 频道」映射，判断是否允许访问 `console` 频道。
+4. 若已启用变更守卫，再使用同一组服务端解析的角色判断该用户能否执行持久化变更或外部副作用；请求体或自定义角色头不能提升权限。
 
 #### 响应语义
 
@@ -1183,4 +1336,4 @@ fetch("/api/console/chat", {
 
 #### 身份缓存时效
 
-身份校验结果带约 **60 秒缓存**。用户在 NocoBase 登出后，QwenPaw 侧最多 ≤60 秒才跟随失效。
+身份及其角色结果带约 **60 秒缓存**。缓存未命中时会重新调用 `auth:check?appends=roles`；用户登出或角色变更后，QwenPaw 侧最多约 60 秒跟随更新。

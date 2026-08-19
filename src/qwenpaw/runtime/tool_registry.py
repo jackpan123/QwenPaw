@@ -12,6 +12,101 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable
 
+from ..security.mutation_guard import ActionEffect
+
+
+@dataclass(frozen=True)
+class ToolEffectSpec:
+    """Per-tool side-effect model for the role-based mutation gate.
+
+    A tool's effect can be fixed (``default``) or depend on which value the
+    model picked for a selector param (e.g. a browser tool is READ for
+    ``snapshot`` but EXTERNAL_SIDE_EFFECT for ``click``). ``resolve`` maps
+    the chosen value to an :class:`ActionEffect`, falling back to
+    ``default`` when no selector is configured or the value is unrecognised.
+
+    Fail-closed default: unannotated tools resolve to ``ActionEffect.UNKNOWN``
+    so non-privileged members are denied (UNKNOWN is neither READ nor
+    CHAT_INFRASTRUCTURE). Task 6 sets real values; Task 5 only builds the
+    mechanism.
+    """
+
+    default: ActionEffect = ActionEffect.UNKNOWN
+    selector_param: str = ""
+    read_values: tuple[str, ...] = ()
+    mutate_values: tuple[str, ...] = ()
+    external_values: tuple[str, ...] = ()
+    _read_value_set: frozenset[str] = field(
+        init=False,
+        repr=False,
+        compare=False,
+    )
+    _mutate_value_set: frozenset[str] = field(
+        init=False,
+        repr=False,
+        compare=False,
+    )
+    _external_value_set: frozenset[str] = field(
+        init=False,
+        repr=False,
+        compare=False,
+    )
+
+    def __post_init__(self) -> None:
+        """Precompute normalized selectors and reject ambiguous effects."""
+        read = frozenset(item.casefold() for item in self.read_values)
+        mutate = frozenset(item.casefold() for item in self.mutate_values)
+        external = frozenset(item.casefold() for item in self.external_values)
+        conflicts = (read & mutate) | (read & external) | (mutate & external)
+        if conflicts:
+            values = ", ".join(sorted(conflicts))
+            raise ValueError(f"conflicting effect values: {values}")
+        object.__setattr__(self, "_read_value_set", read)
+        object.__setattr__(self, "_mutate_value_set", mutate)
+        object.__setattr__(self, "_external_value_set", external)
+
+    def resolve(self, params: dict[str, Any] | None) -> ActionEffect:
+        """Resolve the effect for one concrete invocation."""
+        if not self.selector_param:
+            return self.default
+        value = str((params or {}).get(self.selector_param) or "").casefold()
+        if not value:
+            return self.default
+        if value in self._read_value_set:
+            return ActionEffect.READ
+        if value in self._mutate_value_set:
+            return ActionEffect.MUTATE
+        if value in self._external_value_set:
+            return ActionEffect.EXTERNAL_SIDE_EFFECT
+        return self.default
+
+
+def get_tool_effect_spec(func: Any) -> ToolEffectSpec:
+    """Read effect metadata from a dynamic tool, defaulting fail-closed."""
+    descriptor = getattr(func, "_tool_descriptor", None)
+    effect = getattr(descriptor, "effect", None)
+    if isinstance(effect, ToolEffectSpec):
+        return effect
+    return ToolEffectSpec()
+
+
+# Maps the ``side_effect`` string on ``@tool_descriptor`` to an
+# ``ActionEffect``. Default "unknown" → UNKNOWN so unannotated tools are
+# fail-closed for non-privileged members.
+_SIDE_EFFECT_MAP: dict[str, ActionEffect] = {
+    "read": ActionEffect.READ,
+    "mutate": ActionEffect.MUTATE,
+    "external_side_effect": ActionEffect.EXTERNAL_SIDE_EFFECT,
+    "external": ActionEffect.EXTERNAL_SIDE_EFFECT,
+    "unknown": ActionEffect.UNKNOWN,
+    "chat_infrastructure": ActionEffect.CHAT_INFRASTRUCTURE,
+}
+
+
+def _resolve_default_effect(value: str) -> ActionEffect:
+    """Map a ``side_effect`` descriptor string to an ``ActionEffect``."""
+    return _SIDE_EFFECT_MAP.get(value.casefold(), ActionEffect.UNKNOWN)
+
 
 @dataclass(frozen=True)
 class ToolGovernanceSpec:
@@ -84,6 +179,10 @@ class ToolDescriptor:
         default_factory=ToolGovernanceSpec,
     )
     ui: ToolUISpec = field(default_factory=ToolUISpec)
+    # Role-based side-effect model consumed by the authoritative mutation
+    # gate (the first check in ``check_permissions``). Defaults to UNKNOWN
+    # so unannotated tools are fail-closed for non-privileged members.
+    effect: ToolEffectSpec = field(default_factory=ToolEffectSpec)
 
 
 class ToolRegistry:
@@ -235,6 +334,14 @@ def tool_descriptor(
     ui_description: str = "",
     ui_icon: str = "",
     display_to_user: bool = True,
+    # Role-based side-effect model (packed into ToolEffectSpec). Default
+    # "unknown" → UNKNOWN so unannotated tools are fail-closed for
+    # non-privileged members.
+    side_effect: str = "unknown",
+    side_effect_param: str = "",
+    read_only_values: tuple[str, ...] = (),
+    mutate_values: tuple[str, ...] = (),
+    external_values: tuple[str, ...] = (),
     **metadata: Any,
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Attach a :class:`ToolDescriptor` to ``fn._tool_descriptor`` and
@@ -302,6 +409,13 @@ def tool_descriptor(
                 icon=ui_icon,
                 display_to_user=display_to_user,
             ),
+            effect=ToolEffectSpec(
+                default=_resolve_default_effect(side_effect),
+                selector_param=side_effect_param,
+                read_values=tuple(read_only_values),
+                mutate_values=tuple(mutate_values),
+                external_values=tuple(external_values),
+            ),
         )
         # pylint: enable=protected-access
         if id(fn) not in _REGISTERED_IDS:
@@ -314,9 +428,11 @@ def tool_descriptor(
 
 __all__ = [
     "ToolDescriptor",
+    "ToolEffectSpec",
     "ToolGovernanceSpec",
     "ToolUISpec",
     "ToolRegistry",
+    "get_tool_effect_spec",
     "get_builtin_tool_funcs",
     "tool_descriptor",
 ]

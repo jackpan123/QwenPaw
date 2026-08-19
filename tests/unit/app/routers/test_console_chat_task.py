@@ -22,6 +22,7 @@ from qwenpaw.agents.fork_project import (
     register_fork,
 )
 from qwenpaw.app.routers import console
+from qwenpaw.security.mutation_guard import RequestPrincipal
 
 
 @dataclass(frozen=True)
@@ -85,7 +86,32 @@ def _install_hook(fork: _Fork, tmp_path: Path, body: str) -> None:
     _git(fork.worktree, "config", "core.hooksPath", str(hooks))
 
 
+def _privileged_request() -> SimpleNamespace:
+    """A request carrying a privileged principal.
+
+    Forking is a privileged operation under the mutation guard, and the
+    console handler reads the server-derived identity off ``request.state``.
+    """
+    return SimpleNamespace(
+        state=SimpleNamespace(
+            user="admin-user",
+            user_roles=["admin"],
+            request_principal=RequestPrincipal(
+                user_id="admin-user",
+                roles=("admin",),
+                source="nocobase",
+                guarded=True,
+                can_mutate=True,
+            ),
+        ),
+    )
+
+
 class _ChatManager:
+    async def get_chat_by_identity(self, **_kwargs: Any) -> None:
+        # The guard resolves the authenticated caller's own chat first.
+        return None
+
     async def get_or_create_chat(
         self,
         *args: Any,
@@ -168,7 +194,10 @@ async def _submit_forked_task(
     if timeout is not None:
         payload["timeout"] = timeout
 
-    submitted = await console.post_console_chat_task(payload, None)
+    submitted = await console.post_console_chat_task(
+        payload,
+        _privileged_request(),
+    )
     task_id = submitted["task_id"]
     background_task = console._bg_tasks[task_id].asyncio_task
     assert background_task is not None
@@ -185,7 +214,10 @@ async def _wait_for_file(path: Path) -> None:
 
 async def _wait_for_task_to_finish(task_id: str) -> dict[str, Any]:
     for _ in range(200):
-        task = await console.get_console_chat_task(task_id)
+        task = await console.get_console_chat_task(
+            task_id,
+            _privileged_request(),
+        )
         if task["status"] == "finished":
             return task
         await asyncio.sleep(0.05)
@@ -230,7 +262,10 @@ async def test_forked_task_reports_failed_when_worktree_cannot_be_finalized(
     )
 
     await asyncio.wait_for(background_task, timeout=10)
-    task = await console.get_console_chat_task(task_id)
+    task = await console.get_console_chat_task(
+        task_id,
+        _privileged_request(),
+    )
     registry = json.loads(
         (fork.project / REGISTRY_REL).read_text(encoding="utf-8"),
     )
@@ -275,7 +310,10 @@ async def test_forked_task_reports_failed_when_worktree_finalization_raises(
     )
 
     await asyncio.wait_for(background_task, timeout=10)
-    task = await console.get_console_chat_task(task_id)
+    task = await console.get_console_chat_task(
+        task_id,
+        _privileged_request(),
+    )
     registry = json.loads(
         (fork.project / REGISTRY_REL).read_text(encoding="utf-8"),
     )
@@ -322,7 +360,10 @@ async def test_forked_task_timeout_during_finalization_stays_failed(
         (fork.worktree / ".hook-release").touch()
         await asyncio.wait_for(background_task, timeout=10)
         # Detached Git may still commit; the task result must stay timeout.
-        after_release = await console.get_console_chat_task(task_id)
+        after_release = await console.get_console_chat_task(
+            task_id,
+            _privileged_request(),
+        )
         after_error = (after_release.get("result") or {}).get("error") or {}
         assert after_release["status"] == "finished"
         assert after_release["result"]["status"] == "failed"
@@ -378,7 +419,10 @@ async def test_timeout_then_detached_finalize_exception_marks_registry_failed(
             fork.branch,
             "failed",
         )
-        after = await console.get_console_chat_task(task_id)
+        after = await console.get_console_chat_task(
+            task_id,
+            _privileged_request(),
+        )
         after_error = (after.get("result") or {}).get("error") or {}
         assert after["status"] == "finished"
         assert after["result"]["status"] == "failed"
@@ -410,12 +454,18 @@ async def test_forked_task_stays_running_until_worktree_is_finalized(
     )
     try:
         await _wait_for_file(fork.worktree / ".hook-started")
-        in_progress = await console.get_console_chat_task(task_id)
+        in_progress = await console.get_console_chat_task(
+            task_id,
+            _privileged_request(),
+        )
         assert in_progress["status"] == "running"
 
         (fork.worktree / ".hook-release").touch()
         await asyncio.wait_for(background_task, timeout=10)
-        completed = await console.get_console_chat_task(task_id)
+        completed = await console.get_console_chat_task(
+            task_id,
+            _privileged_request(),
+        )
         fork_head = _git(fork.worktree, "rev-parse", "HEAD").stdout.strip()
 
         assert (

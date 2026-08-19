@@ -3,11 +3,17 @@
  */
 import { describe, it, expect, beforeEach } from "vitest";
 import { render } from "@testing-library/react";
-import { routeRegistry } from "../store";
+import { filterRoutesForAuthorization, routeRegistry } from "../store";
 import { auditStore } from "../audit";
 
 const Base = () => <div data-testid="base">base</div>;
 const PluginPage = () => <div data-testid="plugin">plugin</div>;
+
+function getRouteComponent(id: string) {
+  const route = routeRegistry.snapshot().find((item) => item.id === id);
+  if (!route) throw new Error(`Expected route ${id} to be registered`);
+  return route.Component;
+}
 
 beforeEach(() => {
   routeRegistry.__resetForTests();
@@ -42,13 +48,34 @@ describe("routeRegistry.add", () => {
         .some((r) => r.kind === "route.conflict" && r.targetId === "r2"),
     ).toBe(true);
   });
+
+  it("preserves the declared route capability in snapshots", () => {
+    routeRegistry.add("core", {
+      id: "read-route",
+      path: "/read",
+      component: Base,
+      capability: "read",
+    });
+
+    expect(routeRegistry.snapshot()[0].capability).toBe("read");
+  });
+
+  it("leaves a plugin route without a declared capability undefined", () => {
+    routeRegistry.add("plugin", {
+      id: "implicit-plugin-route",
+      path: "/plugin",
+      component: PluginPage,
+    });
+
+    expect(routeRegistry.snapshot()[0].capability).toBeUndefined();
+  });
 });
 
 describe("routeRegistry.replace", () => {
   it("LIFO winner; rendered Component reflects override", () => {
     routeRegistry.add("core", { id: "p", path: "/p", component: Base });
     routeRegistry.replace("p1", "p", PluginPage);
-    const Comp = routeRegistry.snapshot().find((r) => r.id === "p")?.Component!;
+    const Comp = getRouteComponent("p");
     expect(Comp).toBeTruthy();
     const { getByTestId } = render(<Comp />);
     expect(getByTestId("plugin")).toBeInTheDocument();
@@ -58,9 +85,22 @@ describe("routeRegistry.replace", () => {
     routeRegistry.add("core", { id: "p", path: "/p", component: Base });
     const d = routeRegistry.replace("p1", "p", PluginPage);
     d.dispose();
-    const Comp = routeRegistry.snapshot().find((r) => r.id === "p")?.Component!;
+    const Comp = getRouteComponent("p");
     const { getByTestId } = render(<Comp />);
     expect(getByTestId("base")).toBeInTheDocument();
+  });
+
+  it("cannot elevate the base route capability", () => {
+    routeRegistry.add("core", {
+      id: "p",
+      path: "/p",
+      component: Base,
+      capability: "mutate",
+    });
+    // @ts-expect-error replacements intentionally accept components only
+    routeRegistry.replace("p1", "p", PluginPage, { capability: "read" });
+
+    expect(routeRegistry.snapshot()[0].capability).toBe("mutate");
   });
 });
 
@@ -77,7 +117,7 @@ describe("routeRegistry.wrap — onion composition", () => {
         <Inner />
       </div>
     ));
-    const Comp = routeRegistry.snapshot().find((r) => r.id === "p")?.Component!;
+    const Comp = getRouteComponent("p");
     const { getByTestId, container } = render(<Comp />);
     // p2 should wrap p1 (p2 is last registered → outermost)
     const outerP2 = getByTestId("outer-p2");
@@ -94,7 +134,7 @@ describe("routeRegistry.wrap — onion composition", () => {
         <Inner />
       </div>
     ));
-    const Comp = routeRegistry.snapshot().find((r) => r.id === "p")?.Component!;
+    const Comp = getRouteComponent("p");
     const { queryByTestId } = render(<Comp />);
     expect(queryByTestId("wrap")).toBeInTheDocument();
     expect(queryByTestId("plugin")).toBeInTheDocument();
@@ -109,10 +149,75 @@ describe("routeRegistry.wrap — onion composition", () => {
       </div>
     ));
     d.dispose();
-    const Comp = routeRegistry.snapshot().find((r) => r.id === "p")?.Component!;
+    const Comp = getRouteComponent("p");
     const { queryByTestId } = render(<Comp />);
     expect(queryByTestId("wrap")).not.toBeInTheDocument();
     expect(queryByTestId("base")).toBeInTheDocument();
+  });
+
+  it("cannot elevate the base route capability", () => {
+    routeRegistry.add("core", {
+      id: "p",
+      path: "/p",
+      component: Base,
+      capability: "mutate",
+    });
+
+    // @ts-expect-error wrappers intentionally accept component transforms only
+    routeRegistry.wrap("p1", "p", (Inner) => Inner, {
+      capability: "read",
+    });
+
+    expect(routeRegistry.snapshot()[0].capability).toBe("mutate");
+  });
+});
+
+describe("filterRoutesForAuthorization", () => {
+  it("keeps every route when mutation is authorized", () => {
+    routeRegistry.add("core", {
+      id: "read",
+      path: "/read",
+      component: Base,
+      capability: "read",
+    });
+    routeRegistry.add("core", {
+      id: "mutate",
+      path: "/mutate",
+      component: Base,
+      capability: "mutate",
+    });
+
+    expect(
+      filterRoutesForAuthorization(routeRegistry.snapshot(), true).map(
+        (route) => route.id,
+      ),
+    ).toEqual(["read", "mutate"]);
+  });
+
+  it("keeps only explicit read routes for a read-only member", () => {
+    routeRegistry.add("core", {
+      id: "read",
+      path: "/read",
+      component: Base,
+      capability: "read",
+    });
+    routeRegistry.add("plugin", {
+      id: "implicit-plugin-route",
+      path: "/plugin",
+      component: PluginPage,
+    });
+    routeRegistry.add("core", {
+      id: "mutate",
+      path: "/mutate",
+      component: Base,
+      capability: "mutate",
+    });
+
+    expect(
+      filterRoutesForAuthorization(routeRegistry.snapshot(), false).map(
+        (route) => route.id,
+      ),
+    ).toEqual(["read"]);
   });
 });
 

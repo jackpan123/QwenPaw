@@ -219,6 +219,109 @@ async def test_request_stop_returns_false_when_no_run():
     assert await tracker.request_stop("missing") is False
 
 
+@pytest.mark.asyncio
+async def test_request_stop_only_allows_the_recorded_owner():
+    tracker = TaskTracker()
+    started = asyncio.Event()
+
+    async def long_stream(_payload):
+        started.set()
+        await asyncio.sleep(60)
+        yield "never"
+
+    await tracker.attach_or_start(
+        "owned-run",
+        payload=None,
+        stream_fn=long_stream,
+        owner_id="alice",
+    )
+    await asyncio.wait_for(started.wait(), timeout=1)
+
+    assert (
+        await tracker.request_stop("owned-run", requester_id="mallory")
+        is False
+    )
+    assert await tracker.get_status("owned-run") == "running"
+    assert await tracker.request_stop("owned-run", requester_id="alice")
+
+
+@pytest.mark.asyncio
+async def test_request_stop_without_requester_preserves_operator_override():
+    tracker = TaskTracker()
+    started = asyncio.Event()
+
+    async def long_stream(_payload):
+        started.set()
+        await asyncio.sleep(60)
+        yield "never"
+
+    await tracker.attach_or_start(
+        "operator-run",
+        payload=None,
+        stream_fn=long_stream,
+        owner_id="alice",
+    )
+    await asyncio.wait_for(started.wait(), timeout=1)
+
+    assert await tracker.request_stop("operator-run") is True
+
+
+@pytest.mark.asyncio
+async def test_attach_rejects_a_different_trusted_owner():
+    tracker = TaskTracker()
+    started = asyncio.Event()
+
+    async def long_stream(_payload):
+        started.set()
+        await asyncio.sleep(60)
+        yield "never"
+
+    await tracker.attach_or_start(
+        "owned-attach",
+        payload=None,
+        stream_fn=long_stream,
+        owner_id="alice",
+    )
+    await asyncio.wait_for(started.wait(), timeout=1)
+
+    with pytest.raises(PermissionError):
+        await tracker.attach("owned-attach", requester_id="mallory")
+
+    assert await tracker.attach("owned-attach", requester_id="alice")
+    assert await tracker.attach("owned-attach")
+    await tracker.request_stop("owned-attach")
+
+
+@pytest.mark.asyncio
+async def test_attach_or_start_cannot_join_another_owners_run():
+    tracker = TaskTracker()
+    started = asyncio.Event()
+
+    async def long_stream(_payload):
+        started.set()
+        await asyncio.sleep(60)
+        yield "never"
+
+    await tracker.attach_or_start(
+        "owned-start",
+        payload=None,
+        stream_fn=long_stream,
+        owner_id="alice",
+    )
+    await asyncio.wait_for(started.wait(), timeout=1)
+
+    with pytest.raises(PermissionError):
+        await tracker.attach_or_start(
+            "owned-start",
+            payload=None,
+            stream_fn=long_stream,
+            owner_id="mallory",
+            requester_id="mallory",
+        )
+
+    await tracker.request_stop("owned-start")
+
+
 # ---------------------------------------------------------------------------
 # Error path: producer exception broadcasts an error SSE.
 # ---------------------------------------------------------------------------

@@ -8,11 +8,13 @@
  *   without depending on a real WebSocket runtime
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { screen, waitFor, act } from "@testing-library/react";
+import { screen, waitFor, act, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { renderWithProviders } from "@/test/common_setup";
 import ChatPage from "./index";
 import { chatExtensions } from "@/plugins/registry/chatExtensions";
+import { useAuthorizationStore } from "@/stores/authorizationStore";
+import { useUploadLimitStore } from "@/stores/uploadLimitStore";
 
 // ---------------------------------------------------------------------------
 // Capture AgentScopeRuntimeWebUI options
@@ -25,23 +27,37 @@ const {
   mockUploadFile,
   mockFilePreviewUrl,
   mockGetApiUrl,
+  mockStopChat,
   mockSelectedAgent,
   mockSetSelectedAgent,
   mockGetTranscriptionProviderType,
+  mockToggleRecording,
+  mockTranscribeAudio,
 } = vi.hoisted(() => ({
   mockListProviders: vi.fn(),
   mockGetActiveModels: vi.fn(),
   mockUploadFile: vi.fn(),
   mockFilePreviewUrl: vi.fn((f: string) => `/preview/${f}`),
   mockGetApiUrl: vi.fn((p: string) => `/api${p}`),
+  mockStopChat: vi.fn().mockResolvedValue(undefined),
   mockSelectedAgent: vi.fn(() => "default"),
   mockSetSelectedAgent: vi.fn(),
   mockGetTranscriptionProviderType: vi.fn(),
+  mockToggleRecording: vi.fn(),
+  mockTranscribeAudio: vi.fn().mockResolvedValue({ text: "voice text" }),
 }));
 
 vi.mock("../../hooks/useAppMessage", () => ({
   useAppMessage: () => ({
     message: { success: vi.fn(), error: vi.fn(), warning: vi.fn() },
+  }),
+}));
+
+vi.mock("react-i18next", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("react-i18next")>()),
+  useTranslation: () => ({
+    t: (key: string) => key,
+    i18n: { language: "en" },
   }),
 }));
 
@@ -65,11 +81,50 @@ vi.mock("./components/ChatSessionInitializer", () => ({
   default: () => null,
 }));
 
+vi.mock("../../components/LoopInput", () => ({
+  LoopModeSelector: () => null,
+}));
+
+vi.mock("./components/WhisperSpeechButton", async () => {
+  const React = await import("react");
+  const simulateRecordingAndUpload = () => {
+    mockToggleRecording();
+    void mockTranscribeAudio(new Blob(["voice"], { type: "audio/webm" }));
+  };
+  const MockWhisperSpeechButton = React.forwardRef((_props, ref) => {
+    React.useImperativeHandle(ref, () => ({
+      toggleRecording: simulateRecordingAndUpload,
+      isRecording: () => false,
+      isLoading: () => false,
+    }));
+    return (
+      <button
+        data-testid="whisper-speech-button"
+        onClick={simulateRecordingAndUpload}
+      >
+        voice
+      </button>
+    );
+  });
+  MockWhisperSpeechButton.displayName = "MockWhisperSpeechButton";
+  return { default: MockWhisperSpeechButton };
+});
+
+vi.mock("./HostBubbles", () => ({
+  HostRequestCard: () => null,
+  HostResponseCard: () => null,
+}));
+
 vi.mock("@agentscope-ai/chat", () => ({
   // render rightHeader so child components appear in the DOM
   AgentScopeRuntimeWebUI: vi.fn((props: any) => {
     capturedOptions = props.options;
-    return <div data-testid="chat-ui">{props.options?.theme?.rightHeader}</div>;
+    return (
+      <div data-testid="chat-ui">
+        {props.options?.theme?.rightHeader}
+        {props.options?.sender?.prefix}
+      </div>
+    );
   }),
   useChatAnywhereSessionsState: vi.fn(() => ({
     sessions: [],
@@ -95,7 +150,7 @@ vi.mock("@/api/modules/chat", () => ({
   chatApi: {
     uploadFile: mockUploadFile,
     filePreviewUrl: mockFilePreviewUrl,
-    stopChat: vi.fn(),
+    stopChat: mockStopChat,
   },
   sessionApi: {
     getRealIdForSession: vi.fn(() => null),
@@ -107,8 +162,13 @@ vi.mock("@/api/modules/chat", () => ({
 vi.mock("@/api/modules/agent", () => ({
   agentApi: {
     getTranscriptionProviderType: mockGetTranscriptionProviderType,
+    transcribeAudio: mockTranscribeAudio,
   },
   TranscriptionError: class TranscriptionError extends Error {},
+}));
+
+vi.mock("@/api/modules/skill", () => ({
+  skillApi: { listSkills: vi.fn().mockResolvedValue([]) },
 }));
 
 vi.mock("antd", async (importOriginal) => {
@@ -130,12 +190,27 @@ vi.mock("@/api/config", () => ({
   getApiToken: vi.fn(() => ""),
 }));
 
-vi.mock("@/stores/agentStore", () => ({
-  useAgentStore: vi.fn(() => ({
+vi.mock("@/stores/agentStore", () => {
+  const useAgentStore = vi.fn(() => ({
     selectedAgent: mockSelectedAgent(),
+    // Upstream reads the agent list to derive backend capabilities.
+    agents: [],
     setSelectedAgent: mockSetSelectedAgent,
-  })),
-}));
+    getLastChatId: vi.fn(() => null),
+    setLastChatId: vi.fn(),
+  })) as unknown as {
+    (): unknown;
+    subscribe: ReturnType<typeof vi.fn>;
+    getState: ReturnType<typeof vi.fn>;
+  };
+  // sessionListStore subscribes to agent switches at import time.
+  useAgentStore.subscribe = vi.fn(() => () => {});
+  useAgentStore.getState = vi.fn(() => ({
+    selectedAgent: mockSelectedAgent(),
+    agents: [],
+  }));
+  return { useAgentStore };
+});
 
 vi.mock("@/contexts/ThemeContext", () => ({
   useTheme: vi.fn(() => ({ isDark: false })),
@@ -148,16 +223,29 @@ vi.mock("./sessionApi", () => ({
     onSessionSelected: null,
     onSessionCreated: null,
     getRealIdForSession: vi.fn(() => null),
+    getSessionIdentity: vi.fn(() => ({
+      sessionId: "",
+      userId: "console",
+      channel: "console",
+    })),
     setLastUserMessage: vi.fn(),
+    triggerResolve: vi.fn(),
   },
 }));
 
 vi.mock("./OptionsPanel/defaultConfig", () => ({
-  default: { theme: { leftHeader: {} }, api: {} },
+  default: {
+    theme: { leftHeader: {}, bubbleList: { userMessageAnchors: {} } },
+    api: {},
+  },
   getDefaultConfig: vi.fn(() => ({
     theme: { leftHeader: {} },
     welcome: {},
-    sender: {},
+    sender: {
+      attachments: true,
+      longTextUpload: { enabled: true },
+      maxLength: 10000,
+    },
   })),
 }));
 
@@ -212,6 +300,13 @@ describe("ChatPage", () => {
     mockGetTranscriptionProviderType.mockResolvedValue({
       transcription_provider_type: "disabled",
     });
+    useAuthorizationStore.getState().set({
+      authEnabled: false,
+      username: null,
+      roles: [],
+      canMutate: true,
+    });
+    useUploadLimitStore.setState({ uploadMaxSizeMb: 10 });
   });
 
   afterEach(() => {
@@ -341,13 +436,19 @@ describe("ChatPage", () => {
       signal: undefined,
     });
 
-    const init = vi.mocked(fetch).mock.calls[0][1] as RequestInit;
+    const chatCall = vi
+      .mocked(fetch)
+      .mock.calls.find(([url]) => url === "/api/console/chat");
+    expect(chatCall).toBeDefined();
+    const init = chatCall![1] as RequestInit;
     const body = JSON.parse(String(init.body)) as Record<string, unknown>;
-    expect(body.request_context).toEqual({
-      session_id: "session-1",
-      agent_id: "default",
-      datasource_id: "ds-123",
-    });
+    expect(body.request_context).toEqual(
+      expect.objectContaining({
+        session_id: "session-1",
+        agent_id: "default",
+        datasource_id: "ds-123",
+      }),
+    );
   });
 
   // ── handleFileUpload ──────────────────────────────────────────────────────
@@ -392,6 +493,82 @@ describe("ChatPage", () => {
     expect(onError).not.toHaveBeenCalled();
   });
 
+  it("removes upload entry points for a read-only member", async () => {
+    useAuthorizationStore.getState().set({
+      authEnabled: true,
+      username: "member-user",
+      roles: ["member"],
+      canMutate: false,
+    });
+
+    renderWithProviders(<ChatPage />, { initialEntries: ["/chat"] });
+    await screen.findByTestId("chat-ui");
+
+    expect(capturedOptions.sender.attachments).toBeUndefined();
+    expect(capturedOptions.sender.longTextUpload).toBeUndefined();
+    expect(mockUploadFile).not.toHaveBeenCalled();
+  });
+
+  it("keeps a captured upload handler inert after runtime downgrade", async () => {
+    renderWithProviders(<ChatPage />, { initialEntries: ["/chat"] });
+    await screen.findByTestId("chat-ui");
+    const staleUpload = capturedOptions.sender.attachments.customRequest;
+    useAuthorizationStore.getState().set({
+      authEnabled: true,
+      username: "member-user",
+      roles: ["member"],
+      canMutate: false,
+    });
+
+    await staleUpload({
+      file: new File(["content"], "img.png", { type: "image/png" }),
+      onSuccess: vi.fn(),
+      onError: vi.fn(),
+      onProgress: vi.fn(),
+    });
+
+    expect(mockUploadFile).not.toHaveBeenCalled();
+  });
+
+  it("still sends plain text for a read-only member", async () => {
+    useAuthorizationStore.getState().set({
+      authEnabled: true,
+      username: "member-user",
+      roles: ["member"],
+      canMutate: false,
+    });
+    global.fetch = vi
+      .fn()
+      .mockResolvedValue({ ok: true, status: 200 } as Response);
+
+    renderWithProviders(<ChatPage />, { initialEntries: ["/chat"] });
+    await screen.findByTestId("chat-ui");
+    await capturedOptions.api.fetch({
+      input: [{ role: "user", content: "hello" }],
+      signal: undefined,
+    });
+
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/console/chat",
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  it("still stops the current generation for a read-only member", async () => {
+    useAuthorizationStore.getState().set({
+      authEnabled: true,
+      username: "member-user",
+      roles: ["member"],
+      canMutate: false,
+    });
+
+    renderWithProviders(<ChatPage />, { initialEntries: ["/chat"] });
+    await screen.findByTestId("chat-ui");
+    capturedOptions.api.cancel({ session_id: "session-1" });
+
+    expect(mockStopChat).toHaveBeenCalledWith("session-1");
+  });
+
   // ── voice input mode ───────────────────────────────────────────────────────
 
   it("does not enable browser speech before transcription provider type loads", async () => {
@@ -408,7 +585,6 @@ describe("ChatPage", () => {
     await screen.findByTestId("chat-ui");
 
     expect(capturedOptions.sender.allowSpeech).toBe(false);
-    expect(capturedOptions.sender.prefix).toBeUndefined();
 
     act(() => {
       resolveProviderType({ transcription_provider_type: "disabled" });
@@ -425,8 +601,79 @@ describe("ChatPage", () => {
 
     await waitFor(() => {
       expect(capturedOptions.sender.allowSpeech).toBe(false);
-      expect(capturedOptions.sender.prefix).toBeTruthy();
+      expect(screen.getByTestId("whisper-speech-button")).toBeInTheDocument();
     });
+  });
+
+  it("hides Whisper and blocks voice shortcuts for a read-only member", async () => {
+    useAuthorizationStore.getState().set({
+      authEnabled: true,
+      username: "member-user",
+      roles: ["member"],
+      canMutate: false,
+    });
+    mockGetTranscriptionProviderType.mockResolvedValue({
+      transcription_provider_type: "whisper_api",
+    });
+
+    renderWithProviders(<ChatPage />, { initialEntries: ["/chat"] });
+    await screen.findByTestId("chat-ui");
+    await waitFor(() =>
+      expect(
+        screen.queryByTestId("whisper-speech-button"),
+      ).not.toBeInTheDocument(),
+    );
+
+    fireEvent.keyDown(document, { key: "m", ctrlKey: true, shiftKey: true });
+    fireEvent.keyDown(document, { key: "M", metaKey: true, shiftKey: true });
+
+    expect(mockToggleRecording).not.toHaveBeenCalled();
+    expect(mockTranscribeAudio).not.toHaveBeenCalled();
+  });
+
+  it("keeps the Whisper button and shortcut for users who can mutate", async () => {
+    mockGetTranscriptionProviderType.mockResolvedValue({
+      transcription_provider_type: "whisper_api",
+    });
+
+    renderWithProviders(<ChatPage />, { initialEntries: ["/chat"] });
+    await screen.findByTestId("chat-ui");
+    expect(await screen.findByTestId("whisper-speech-button")).toBeVisible();
+
+    fireEvent.keyDown(document, { key: "m", ctrlKey: true, shiftKey: true });
+
+    expect(mockToggleRecording).toHaveBeenCalledOnce();
+    expect(mockTranscribeAudio).toHaveBeenCalledWith(expect.any(Blob));
+  });
+
+  it("blocks a mounted voice shortcut immediately after runtime downgrade", async () => {
+    mockGetTranscriptionProviderType.mockResolvedValue({
+      transcription_provider_type: "whisper_api",
+    });
+    renderWithProviders(<ChatPage />, { initialEntries: ["/chat"] });
+    await screen.findByTestId("chat-ui");
+    expect(await screen.findByTestId("whisper-speech-button")).toBeVisible();
+
+    act(() => {
+      useAuthorizationStore.getState().set({
+        authEnabled: true,
+        username: "member-user",
+        roles: ["member"],
+        canMutate: false,
+      });
+    });
+    mockToggleRecording.mockClear();
+    mockTranscribeAudio.mockClear();
+
+    fireEvent.keyDown(document, { key: "m", ctrlKey: true, shiftKey: true });
+
+    expect(mockToggleRecording).not.toHaveBeenCalled();
+    expect(mockTranscribeAudio).not.toHaveBeenCalled();
+    await waitFor(() =>
+      expect(
+        screen.queryByTestId("whisper-speech-button"),
+      ).not.toBeInTheDocument(),
+    );
   });
 
   it("keeps browser speech enabled when transcription provider is disabled", async () => {
@@ -439,7 +686,6 @@ describe("ChatPage", () => {
 
     await waitFor(() => {
       expect(capturedOptions.sender.allowSpeech).toBe(true);
-      expect(capturedOptions.sender.prefix).toBeUndefined();
     });
   });
 

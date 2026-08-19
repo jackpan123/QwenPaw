@@ -14,6 +14,7 @@ import { getChannelLabel } from "../../../Control/Channels/components";
 import { syncSessionsGlobal } from "../../../../stores/sessionListStore";
 import { useAgentStore } from "../../../../stores/agentStore";
 import { useAppMessage } from "../../../../hooks/useAppMessage";
+import { useAuthorizationStore } from "../../../../stores/authorizationStore";
 
 export { ContextMenu, useContextMenu, type ContextMenuItem, getChannelLabel };
 
@@ -132,6 +133,7 @@ export function useSessionListData(
   const { t } = useTranslation();
   const { message } = useAppMessage();
   const { active, currentSessionId, onSessionClick } = opts;
+  const canMutate = useAuthorizationStore((state) => state.canMutate);
   // Re-fetch immediately when the selected agent changes — the shared store
   // is cleared synchronously on the switch and must be repopulated for the
   // new agent without waiting for the next poll tick.
@@ -264,6 +266,7 @@ export function useSessionListData(
 
   const handleDelete = useCallback(
     async (sessionId: string) => {
+      if (!useAuthorizationStore.getState().canMutate) return;
       const owner = sessionApi.getActiveOwner();
       const session = sessions.find((s) => s.id === sessionId);
       const backendId = session ? getBackendId(session) : null;
@@ -313,6 +316,7 @@ export function useSessionListData(
 
   const handleEditStart = useCallback(
     (sessionId: string, currentName: string) => {
+      if (!useAuthorizationStore.getState().canMutate) return;
       setEditingSessionId(sessionId);
       setEditValue(currentName);
     },
@@ -324,6 +328,7 @@ export function useSessionListData(
   }, []);
 
   const handleEditSubmit = useCallback(async () => {
+    if (!useAuthorizationStore.getState().canMutate) return;
     if (!editingSessionId) return;
     const owner = sessionApi.getActiveOwner();
     const session = sessions.find((s) => s.id === editingSessionId);
@@ -345,6 +350,7 @@ export function useSessionListData(
 
   const handlePinToggle = useCallback(
     async (sessionId: string) => {
+      if (!useAuthorizationStore.getState().canMutate) return;
       const owner = sessionApi.getActiveOwner();
       const session = sessions.find((s) => s.id === sessionId);
       const backendId = session ? getBackendId(session) : null;
@@ -363,6 +369,7 @@ export function useSessionListData(
 
   const handleArchiveToggle = useCallback(
     async (sessionId: string) => {
+      if (!useAuthorizationStore.getState().canMutate) return;
       const owner = sessionApi.getActiveOwner();
       const session = sessions.find((s) => s.id === sessionId);
       const backendId = session ? getBackendId(session) : null;
@@ -410,12 +417,14 @@ export function useSessionListData(
   const contextMenuItems: ContextMenuItem[] = useMemo(() => {
     if (!contextMenuSessionId) return [];
     const session = sessions.find((s) => s.id === contextMenuSessionId);
+    const openItem: ContextMenuItem = {
+      key: "open",
+      label: t("chat.contextMenu.open", "Open"),
+      onClick: () => handleSessionClick(contextMenuSessionId),
+    };
+    if (!canMutate) return [openItem];
     return [
-      {
-        key: "open",
-        label: t("chat.contextMenu.open", "Open"),
-        onClick: () => handleSessionClick(contextMenuSessionId),
-      },
+      openItem,
       {
         key: "rename",
         label: t("chat.contextMenu.rename", "Rename"),
@@ -453,6 +462,7 @@ export function useSessionListData(
     handlePinToggle,
     handleArchiveToggle,
     handleDelete,
+    canMutate,
   ]);
 
   return {

@@ -19,6 +19,7 @@ errors.  Covers:
 # pylint: disable=protected-access,redefined-outer-name,unused-argument
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -28,7 +29,9 @@ from fastapi.testclient import TestClient
 
 from qwenpaw.app.crons import heartbeat
 from qwenpaw.app.routers.config import router as config_router
+from qwenpaw.config import Config
 from qwenpaw.config import get_available_channels
+from qwenpaw.config import utils as config_utils
 from qwenpaw.config.config import (
     ChannelConfig,
     ConsoleConfig,
@@ -584,10 +587,9 @@ def test_put_tool_guard_saves_and_reloads_engine(client):
 
     with (
         patch(
-            "qwenpaw.app.routers.config.load_config",
-            return_value=fake_cfg,
-        ),
-        patch("qwenpaw.app.routers.config.save_config") as save_mock,
+            "qwenpaw.app.routers.config.update_config_transaction",
+            side_effect=lambda update: (update(fake_cfg), fake_cfg)[1],
+        ) as update_mock,
         patch(
             "qwenpaw.security.tool_guard.engine.get_guard_engine",
             return_value=engine_mock,
@@ -600,7 +602,7 @@ def test_put_tool_guard_saves_and_reloads_engine(client):
 
     assert response.status_code == 200
     assert response.json()["enabled"] is True
-    save_mock.assert_called_once()
+    update_mock.assert_called_once()
     # The handler must flip the engine flag AND ask it to reload rules.
     assert engine_mock.enabled is True
     engine_mock.reload_rules.assert_called_once()
@@ -671,14 +673,13 @@ def test_put_sandbox_idempotent_same_value_no_save(client):
 
     with (
         patch(
-            "qwenpaw.app.routers.config.load_config",
-            return_value=fake_cfg,
-        ),
+            "qwenpaw.app.routers.config.update_config_transaction",
+            side_effect=lambda update: (update(fake_cfg), fake_cfg)[1],
+        ) as update_mock,
         patch(
             "qwenpaw.app.routers.config._sandbox_effective_status",
             return_value=(True, "unelevated"),
         ),
-        patch("qwenpaw.app.routers.config.save_config") as mock_save,
     ):
         response = client.put(
             "/api/config/security/sandbox",
@@ -690,8 +691,40 @@ def test_put_sandbox_idempotent_same_value_no_save(client):
     assert body["enabled"] is True
     assert body["effective"] is True
     assert body["reason"] == "unelevated"
-    # Must NOT have saved (value unchanged)
-    mock_save.assert_not_called()
+    # The comparison runs inside the transaction callback.
+    update_mock.assert_called_once()
+
+
+def test_put_sandbox_same_value_does_not_write(
+    client,
+    tmp_path,
+    monkeypatch,
+):
+    config_path = tmp_path / "config.json"
+    config = Config()
+    config.security.sandbox_enabled = True
+    config_path.write_text(
+        json.dumps(config.model_dump(mode="json", by_alias=True)),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(config_utils, "get_config_path", lambda: config_path)
+    monkeypatch.setattr(config_utils, "_config_cache", None)
+    monkeypatch.setattr(config_utils, "_config_mtime", None)
+    monkeypatch.setattr(config_utils, "_config_cache_path", None)
+    write_mock = MagicMock()
+    monkeypatch.setattr(config_utils, "write_json_atomic", write_mock)
+
+    with patch(
+        "qwenpaw.app.routers.config._sandbox_effective_status",
+        return_value=(True, None),
+    ):
+        response = client.put(
+            "/api/config/security/sandbox",
+            json={"enabled": True},
+        )
+
+    assert response.status_code == 200
+    write_mock.assert_not_called()
 
 
 def test_put_sandbox_non_admin_enabling_saves_with_unelevated(client):
@@ -701,14 +734,13 @@ def test_put_sandbox_non_admin_enabling_saves_with_unelevated(client):
 
     with (
         patch(
-            "qwenpaw.app.routers.config.load_config",
-            return_value=fake_cfg,
-        ),
+            "qwenpaw.app.routers.config.update_config_transaction",
+            side_effect=lambda update: (update(fake_cfg), fake_cfg)[1],
+        ) as update_mock,
         patch(
             "qwenpaw.app.routers.config._sandbox_effective_status",
             return_value=(True, "unelevated"),
         ),
-        patch("qwenpaw.app.routers.config.save_config") as mock_save,
     ):
         response = client.put(
             "/api/config/security/sandbox",
@@ -720,7 +752,7 @@ def test_put_sandbox_non_admin_enabling_saves_with_unelevated(client):
     assert body["enabled"] is True
     assert body["effective"] is True
     assert body["reason"] == "unelevated"
-    mock_save.assert_called_once()
+    update_mock.assert_called_once()
 
 
 def test_put_sandbox_admin_enabling_saves(client):
@@ -730,14 +762,13 @@ def test_put_sandbox_admin_enabling_saves(client):
 
     with (
         patch(
-            "qwenpaw.app.routers.config.load_config",
-            return_value=fake_cfg,
-        ),
+            "qwenpaw.app.routers.config.update_config_transaction",
+            side_effect=lambda update: (update(fake_cfg), fake_cfg)[1],
+        ) as update_mock,
         patch(
             "qwenpaw.app.routers.config._sandbox_effective_status",
             return_value=(True, None),
         ),
-        patch("qwenpaw.app.routers.config.save_config") as mock_save,
     ):
         response = client.put(
             "/api/config/security/sandbox",
@@ -748,4 +779,4 @@ def test_put_sandbox_admin_enabling_saves(client):
     body = response.json()
     assert body["enabled"] is True
     assert body["effective"] is True
-    mock_save.assert_called_once()
+    update_mock.assert_called_once()

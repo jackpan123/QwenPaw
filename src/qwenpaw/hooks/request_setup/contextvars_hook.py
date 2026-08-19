@@ -41,6 +41,7 @@ class ContextVarsSetupHook(LifecycleHook):
             set_current_agent_id,
             set_current_approval_route,
             set_current_channel,
+            set_current_request_principal,
             set_current_root_session_id,
             set_current_session_id as _set_app_session_id,
             set_current_user_id,
@@ -86,6 +87,25 @@ class ContextVarsSetupHook(LifecycleHook):
                 "approval_level",
             )
         set_current_approval_route(approval_route)
+
+        # Server-trusted authorization identity: sourced ONLY from the
+        # server-derived channel_meta acl_principal. A client-forged
+        # principal in request_context is never honored (it never reaches
+        # channel_meta this way). Absent -> None (fail-safe).
+        from ...security.mutation_guard import RequestPrincipal
+
+        channel_meta = getattr(ctx.request, "channel_meta", None)
+        acl_principal = (
+            channel_meta.get("acl_principal")
+            if isinstance(channel_meta, dict)
+            else None
+        )
+        if isinstance(acl_principal, dict):
+            set_current_request_principal(
+                RequestPrincipal.from_context(acl_principal),
+            )
+        else:
+            set_current_request_principal(None)
 
         agent_project_dir = None
         try:

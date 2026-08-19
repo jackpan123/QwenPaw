@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from ...runtime.slash_command_registry import CommandSpec
+from ...security.mutation_guard import ActionEffect
 
 if TYPE_CHECKING:
     from agentscope.message import Msg
@@ -149,18 +150,21 @@ def build_tool_command_specs(
             handler=_tools_handler,
             category="control",
             help_text="List active tool calls in the current session.",
+            effect=ActionEffect.READ,
         ),
         CommandSpec(
             name="tool-bg",
             handler=_tool_bg_handler,
             category="control",
             help_text="Move a running tool call to background.",
+            effect=ActionEffect.MUTATE,
         ),
         CommandSpec(
             name="tool-cancel",
             handler=_tool_cancel_handler,
             category="control",
             help_text="Cancel a running tool call.",
+            effect=ActionEffect.MUTATE,
         ),
     ]
 

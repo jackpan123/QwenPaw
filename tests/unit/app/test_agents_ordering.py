@@ -43,6 +43,16 @@ def _agent_config(agent_id: str) -> AgentProfileConfig:
     )
 
 
+def _transaction_on(config: Config, after=None):
+    def transaction(update):
+        update(config)
+        if after is not None:
+            after(config)
+        return config
+
+    return transaction
+
+
 def test_agent_profile_flags_survive_config_round_trip(tmp_path):
     """Adding pinned state must preserve an explicit disabled state."""
     config = _build_config(["default", "disabled"], pinned_ids={"disabled"})
@@ -171,8 +181,8 @@ async def test_pin_agent_persists_without_changing_enabled(monkeypatch):
     monkeypatch.setattr(agents_router, "load_config", lambda: config)
     monkeypatch.setattr(
         agents_router,
-        "save_config",
-        saved_configs.append,
+        "update_config_transaction",
+        _transaction_on(config, saved_configs.append),
     )
 
     response = await agents_router.set_agent_pinned("disabled", True)
@@ -187,7 +197,11 @@ async def test_pin_agent_persists_without_changing_enabled(monkeypatch):
 async def test_default_agent_cannot_be_unpinned(monkeypatch):
     """The default agent is always pinned regardless of stored defaults."""
     config = _build_config(["default"])
-    monkeypatch.setattr(agents_router, "load_config", lambda: config)
+    monkeypatch.setattr(
+        agents_router,
+        "update_config_transaction",
+        _transaction_on(config),
+    )
 
     with pytest.raises(HTTPException) as exc_info:
         await agents_router.set_agent_pinned("default", False)
@@ -203,7 +217,11 @@ async def test_reorder_agents_rejects_incomplete_payload(monkeypatch):
         agent_order=["default", "alpha", "beta"],
     )
 
-    monkeypatch.setattr(agents_router, "load_config", lambda: config)
+    monkeypatch.setattr(
+        agents_router,
+        "update_config_transaction",
+        _transaction_on(config),
+    )
 
     with pytest.raises(HTTPException) as exc_info:
         await agents_router.reorder_agents(
@@ -226,9 +244,12 @@ async def test_reorder_agents_persists_valid_order(monkeypatch):
     monkeypatch.setattr(agents_router, "load_config", lambda: config)
     monkeypatch.setattr(
         agents_router,
-        "save_config",
-        lambda updated_config: saved_orders.append(
-            list(updated_config.agents.agent_order),
+        "update_config_transaction",
+        _transaction_on(
+            config,
+            lambda updated_config: saved_orders.append(
+                list(updated_config.agents.agent_order),
+            ),
         ),
     )
 
@@ -251,7 +272,11 @@ async def test_reorder_agents_rejects_non_display_order(monkeypatch):
         agent_order=["default", "pinned", "regular"],
         pinned_ids={"pinned"},
     )
-    monkeypatch.setattr(agents_router, "load_config", lambda: config)
+    monkeypatch.setattr(
+        agents_router,
+        "update_config_transaction",
+        _transaction_on(config),
+    )
 
     with pytest.raises(HTTPException) as exc_info:
         await agents_router.reorder_agents(
@@ -273,7 +298,11 @@ async def test_create_agent_appends_new_id_to_order(monkeypatch, tmp_path):
     )
 
     monkeypatch.setattr(agents_router, "load_config", lambda: config)
-    monkeypatch.setattr(agents_router, "save_config", lambda updated: None)
+    monkeypatch.setattr(
+        agents_router,
+        "update_config_transaction",
+        _transaction_on(config),
+    )
     saved_agents: list[AgentProfileConfig] = []
     monkeypatch.setattr(
         agents_router,
@@ -330,7 +359,11 @@ async def test_delete_agent_removes_id_from_order(monkeypatch):
             assert agent_id == "beta"
 
     monkeypatch.setattr(agents_router, "load_config", lambda: config)
-    monkeypatch.setattr(agents_router, "save_config", lambda updated: None)
+    monkeypatch.setattr(
+        agents_router,
+        "update_config_transaction",
+        _transaction_on(config),
+    )
     monkeypatch.setattr(
         agents_router,
         "_get_multi_agent_manager",

@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 from urllib.parse import quote, unquote, urlsplit
 
+from ..security.mutation_guard import ActionEffect
+
 # Keep the concrete kind set aligned with implemented Driver protocols.  MCP
 # currently exposes tools only.  Future protocols such as ACP/A2A can extend
 # this Literal and _KIND_TO_PATH_SEGMENT in the same change that introduces
@@ -50,6 +52,12 @@ class DriverCapability:
     output_schema: dict[str, Any] = field(default_factory=dict)
     exposure: CapabilityExposure = field(default_factory=CapabilityExposure)
     metadata: dict[str, Any] = field(default_factory=dict)
+    # Role-based side-effect classification consumed by the mutation gate
+    # in ``DriverCapabilityTool.check_permissions``.  Defaults to UNKNOWN so
+    # an unannotated capability is fail-closed for non-privileged members.
+    # MCP handlers map ``readOnlyHint=True`` to READ; everything else stays
+    # UNKNOWN until a Driver explicitly classifies it.
+    effect: ActionEffect = ActionEffect.UNKNOWN
 
 
 @dataclass(frozen=True)
@@ -58,7 +66,7 @@ class DriverInvocation:
 
     capability_id: str
     payload: dict[str, Any]
-    request_context: dict[str, str] = field(default_factory=dict)
+    request_context: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

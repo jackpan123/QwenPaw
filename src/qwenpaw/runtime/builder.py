@@ -24,6 +24,11 @@ if TYPE_CHECKING:
 
 _logger = logging.getLogger(__name__)
 
+# Reserved request_context keys that may never be sourced from the client
+# payload. Only the server-derived channel_meta acl_principal may populate
+# request_principal; a client-supplied value is always dropped (fail-safe).
+_RESERVED_PRINCIPAL_KEYS = frozenset({"request_principal", "acl_principal"})
+
 
 def _descriptor_for(tool: Any) -> Any | None:
     """Return the descriptor from a tool or its common wrapper attributes."""
@@ -129,6 +134,7 @@ class AgentBuilder:
 
         if memory_tools:
             from ..governance import PolicyGuardedTool
+            from .tool_registry import get_tool_effect_spec
 
             for fn in memory_tools:
                 tools.append(
@@ -136,6 +142,7 @@ class AgentBuilder:
                         fn,
                         governor=governor,
                         request_context=request_context,
+                        effect_spec=get_tool_effect_spec(fn),
                     ),
                 )
 
@@ -611,7 +618,31 @@ class AgentBuilder:
             getattr(request, "request_context", None) if request else None
         )
         if isinstance(_payload_ctx, dict):
+            # Defensive: a client may try to forge an identity by placing
+            # request_principal inside the payload request_context. Strip
+            # any such value BEFORE copying; the only trustworthy source
+            # is the server-derived channel_meta acl_principal below.
+            _payload_ctx = {
+                k: v
+                for k, v in _payload_ctx.items()
+                if k not in _RESERVED_PRINCIPAL_KEYS
+            }
             rc.update(_payload_ctx)
+        # Server-trusted authorization identity. Sourced ONLY from the
+        # server-derived channel_meta acl_principal. When channel_meta
+        # lacks it (auth disabled, or a client tried to forge one), we
+        # explicitly pop so "server principal missing" stays fail-safe
+        # rather than leaving a client-supplied value in place.
+        trusted = (
+            _channel_meta.get("acl_principal")
+            if isinstance(_channel_meta, dict)
+            else None
+        )
+        if isinstance(trusted, dict):
+            rc["request_principal"] = dict(trusted)
+        else:
+            rc.pop("request_principal", None)
+
         mode_state = getattr(ctx, "mode_state", {}) or {}
         mission_state = mode_state.get("mission", {})
         if isinstance(mission_state, dict) and mission_state.get("active"):
@@ -1049,6 +1080,9 @@ class AgentBuilder:
         governor: Any,
     ) -> Any:
         """Wrap a raw tool fn in the repo's standard guard (policy or tool)."""
+        from .tool_registry import get_tool_effect_spec
+
+        effect_spec = get_tool_effect_spec(fn)
         if governor is not None:
             from ..governance import PolicyGuardedTool
 
@@ -1056,6 +1090,7 @@ class AgentBuilder:
                 fn,
                 governor=governor,
                 request_context=request_context,
+                effect_spec=effect_spec,
             )
         from .tool_guard import GuardedFunctionTool
 
@@ -1063,6 +1098,7 @@ class AgentBuilder:
             fn,
             agent_id=agent_id,
             request_context=request_context,
+            effect_spec=effect_spec,
         )
 
     @staticmethod

@@ -144,26 +144,49 @@ def _bridge_to_runtime(
     enabled: bool,
     description: str,
     registry,
+    effect: Any = None,
 ) -> None:
     """Attach ToolDescriptor and inject into runtime ToolRegistries.
 
     Replaces any existing descriptor / bootstrap entry for *tool_name*
     so hot-reload does not keep a stale callable.
+
+    ``effect`` is a ``ToolEffectSpec`` carrying the role-based side-effect
+    model; when omitted it defaults to UNKNOWN (fail-closed) inside
+    :class:`ToolDescriptor`.  The plugin tool flows through the normal
+    ``PolicyGuardedTool`` wrapper at runtime, which reads the descriptor's
+    ``effect`` in the authoritative mutation gate (Task 5).
     """
     import inspect
+    from dataclasses import replace
 
     from ..runtime.tool_registry import ToolDescriptor
 
     desc = getattr(tool_func, "_tool_descriptor", None)
-    if desc is None:
-        is_async = inspect.iscoroutinefunction(tool_func)
-        desc = ToolDescriptor(
+    if desc is not None and effect is not None:
+        desc = replace(
+            desc,
             name=tool_name,
             func=tool_func,
-            enabled_by_default=enabled,
-            async_execution=is_async,
-            description=description,
+            effect=effect,
         )
+        # register_tool(side_effect=...) is authoritative over decorator
+        # metadata and any descriptor retained across plugin hot reloads.
+        # All unrelated declarative fields are preserved by replace().
+        # pylint: disable-next=protected-access
+        tool_func._tool_descriptor = desc  # type: ignore[attr-defined]
+    elif desc is None:
+        is_async = inspect.iscoroutinefunction(tool_func)
+        descriptor_kwargs: dict[str, Any] = {
+            "name": tool_name,
+            "func": tool_func,
+            "enabled_by_default": enabled,
+            "async_execution": is_async,
+            "description": description,
+        }
+        if effect is not None:
+            descriptor_kwargs["effect"] = effect
+        desc = ToolDescriptor(**descriptor_kwargs)
         # pylint: disable-next=protected-access
         tool_func._tool_descriptor = desc  # type: ignore[attr-defined]
         logger.info(
@@ -322,8 +345,8 @@ class PluginApi:  # pylint: disable=too-many-public-methods
         self,
         plugin_id: str,
         config: Dict[str, Any],
-        manifest: Dict[str, Any] = None,
-    ):
+        manifest: Dict[str, Any] | None = None,
+    ) -> None:
         """Initialize plugin API.
 
         Args:
@@ -768,6 +791,7 @@ class PluginApi:  # pylint: disable=too-many-public-methods
         enabled: bool = False,
         tool_type: str = "network",
         target_param: str = "",
+        side_effect: str = "unknown",
     ) -> None:
         """Register a tool function into the Agent's toolkit.
 
@@ -801,6 +825,15 @@ class PluginApi:  # pylint: disable=too-many-public-methods
                 semantics for plugin tools while still running Phase 1
                 deep scans.
             target_param: Optional governance target parameter name.
+            side_effect: Role-based mutation-gate classification for the
+                tool — one of ``"read"``, ``"mutate"``,
+                ``"external_side_effect"``, ``"chat_infrastructure"``,
+                ``"unknown"``. Defaults to ``"unknown"`` (fail-closed for
+                non-privileged members). Mapped to an :class:`ActionEffect`
+                via the same logic as ``register_slash_command`` and
+                ``@tool_descriptor``, and carried on the runtime
+                ``ToolDescriptor.effect`` consumed by the authoritative
+                mutation gate.
 
         Example:
             >>> from .tool import my_tool_func
@@ -813,6 +846,14 @@ class PluginApi:  # pylint: disable=too-many-public-methods
             ...         tool_type="network",
             ...     )
         """
+        from ..runtime.tool_registry import (
+            ToolEffectSpec,
+            _resolve_default_effect,
+        )
+
+        effect_spec = ToolEffectSpec(
+            default=_resolve_default_effect(side_effect),
+        )
 
         def _startup_register():
             # Ownership + governance first: fail closed before exposing
@@ -860,6 +901,7 @@ class PluginApi:  # pylint: disable=too-many-public-methods
                     enabled,
                     description,
                     self._registry,
+                    effect=effect_spec,
                 )
                 _write_tool_config(
                     tool_name,
@@ -912,6 +954,7 @@ class PluginApi:  # pylint: disable=too-many-public-methods
         category: str = "plugin",
         help_text: str = "",
         metadata: Optional[Dict[str, Any]] = None,
+        side_effect: str = "unknown",
     ) -> None:
         """Register a slash command into per-workspace registries.
 
@@ -928,8 +971,15 @@ class PluginApi:  # pylint: disable=too-many-public-methods
             category: Origin tag for introspection.
             help_text: Human-readable description shown in menus.
             metadata: Arbitrary key-value metadata.
+            side_effect: Role-based mutation-gate classification for the
+                command — one of ``"read"``, ``"mutate"``,
+                ``"external_side_effect"``, ``"chat_infrastructure"``,
+                ``"unknown"``. Defaults to ``"unknown"`` (fail-closed for
+                non-privileged members). Mapped to an :class:`ActionEffect`
+                via the same logic as ``@tool_descriptor``.
         """
         from ..runtime.slash_command_registry import CommandSpec
+        from ..runtime.tool_registry import _resolve_default_effect
 
         spec = CommandSpec(
             name=name,
@@ -938,6 +988,7 @@ class PluginApi:  # pylint: disable=too-many-public-methods
             category=category,
             help_text=help_text,
             metadata=metadata or {},
+            effect=_resolve_default_effect(side_effect),
         )
 
         def _register_to_workspaces():

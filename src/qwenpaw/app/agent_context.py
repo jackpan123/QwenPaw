@@ -3,6 +3,7 @@
 
 Provides utilities to get the correct agent instance for each request.
 """
+
 import asyncio
 from contextvars import ContextVar
 from contextlib import contextmanager
@@ -15,6 +16,7 @@ from ..config.utils import load_config
 
 if TYPE_CHECKING:
     from .workspace import Workspace
+    from ..security.mutation_guard import RequestPrincipal
 
 # Context variable to store current agent ID across async calls
 _current_agent_id: ContextVar[Optional[str]] = ContextVar(
@@ -46,6 +48,17 @@ _current_channel: ContextVar[Optional[str]] = ContextVar(
 
 _current_approval_route: ContextVar[Optional[dict]] = ContextVar(
     "current_approval_route",
+    default=None,
+)
+
+# Server-trusted authorization identity for the current request. Set ONLY
+# from ``channel_meta["acl_principal"]`` (server-derived); never from the
+# client request body. Used by inter-agent HTTP calls to mint a signed,
+# target-bound credential instead of forwarding the NocoBase token.
+_current_request_principal: ContextVar[
+    "Optional[RequestPrincipal]"
+] = ContextVar(
+    "current_request_principal",
     default=None,
 )
 
@@ -326,3 +339,19 @@ def set_current_approval_route(route: Optional[dict]) -> None:
 def get_current_approval_route() -> Optional[dict]:
     """Return routing metadata used only for spawned-child approvals."""
     return _current_approval_route.get()
+
+
+def set_current_request_principal(
+    principal: "Optional[RequestPrincipal]",
+) -> None:
+    """Publish the server-trusted authorization identity for this request.
+
+    Must be sourced ONLY from ``channel_meta["acl_principal"]``; never
+    from the client request body.
+    """
+    _current_request_principal.set(principal)
+
+
+def get_current_request_principal() -> "Optional[RequestPrincipal]":
+    """Return the server-trusted authorization identity, or None."""
+    return _current_request_principal.get()

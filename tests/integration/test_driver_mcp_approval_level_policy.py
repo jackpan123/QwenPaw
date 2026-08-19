@@ -14,6 +14,8 @@ from qwenpaw.app.mcp.schemas import (
     MCPAccessRule,
     MCPToolDefaultPolicy,
 )
+from qwenpaw.config.config import MutationGuardConfig
+from qwenpaw.drivers.adapters.agentscope_tool import build_driver_agent_tools
 from qwenpaw.drivers.capabilities import DriverInvocation
 from qwenpaw.drivers.contracts import (
     DriverCard,
@@ -99,6 +101,51 @@ async def test_driver_mcp_policy_deny_blocks_client_call(
     )
 
     assert result.error_type == "driver_policy_denied"
+    assert FakeStdIOClient.instances[0].calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+@pytest.mark.p1
+async def test_member_role_gate_precedes_off_mode_and_mcp_transport(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unknown-effect MCP tool cannot bypass RBAC through OFF mode."""
+    patch_mcp_runtime_clients(monkeypatch)
+    monkeypatch.setattr(
+        "qwenpaw.security.mutation_guard.tool_gate.load_config",
+        lambda: SimpleNamespace(
+            security=SimpleNamespace(
+                mutation_guard=MutationGuardConfig(),
+            ),
+        ),
+    )
+    manager = await _registry_with_policy(
+        tmp_path,
+        [PolicyRule(subject="*", effect="allow")],
+    )
+    request_context = {
+        "session_id": "member-session",
+        "approval_level": "OFF",
+        "request_principal": {
+            "user_id": "member@example.com",
+            "roles": ["member"],
+            "source": "nocobase",
+            "guarded": True,
+            "can_mutate": False,
+        },
+    }
+    tools, _hints = await build_driver_agent_tools(
+        manager,
+        request_context,
+    )
+    tool = next(item for item in tools if item.name.endswith("__echo"))
+
+    result = await tool(text="must not reach MCP")
+
+    assert result.state.value == "denied"
+    assert result.metadata["mutation_guard_denied"] is True
     assert FakeStdIOClient.instances[0].calls == []
 
 

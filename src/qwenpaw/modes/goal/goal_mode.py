@@ -9,6 +9,7 @@ Inherits ``AgentMode`` so it plugs into the standard
 ``builtin_mode_clses`` bootstrap — all registration
 stays inside this file and ``modes/goal/``.
 """
+
 from __future__ import annotations
 
 import logging
@@ -31,6 +32,7 @@ from ...runtime.hooks import HookBase, HookContext
 from ...runtime.slash_command_registry import (
     CommandSpec,
 )
+from ...security.mutation_guard import ActionEffect
 from .gates import GoalBudgetGate, GoalTurnGate, RubricGate
 from .helpers import (
     create_completion_gate,
@@ -164,6 +166,7 @@ class GoalMode(AgentMode):
                 category="builtin",
                 help_text=("Set a goal \u2014 agent works " "until done."),
                 metadata={"builtin": True},
+                effect=ActionEffect.MUTATE,
             ),
         ]
 
@@ -171,6 +174,7 @@ class GoalMode(AgentMode):
         """Return goal tools: get/create/update."""
         from ...runtime.tool_registry import (
             ToolDescriptor,
+            ToolEffectSpec,
         )
         from .tools import (
             make_create_goal,
@@ -186,6 +190,7 @@ class GoalMode(AgentMode):
                 description=(
                     "Get the current goal status, " "budgets, and usage."
                 ),
+                effect=ToolEffectSpec(default=ActionEffect.READ),
             ),
             ToolDescriptor(
                 name="create_goal",
@@ -194,12 +199,14 @@ class GoalMode(AgentMode):
                 description=(
                     "Create a goal only when " "explicitly requested."
                 ),
+                effect=ToolEffectSpec(default=ActionEffect.MUTATE),
             ),
             ToolDescriptor(
                 name="update_goal",
                 func=make_update_goal(self),
                 requires_modes=("goal",),
                 description=("Mark goal as complete " "or blocked."),
+                effect=ToolEffectSpec(default=ActionEffect.MUTATE),
             ),
         ]
 

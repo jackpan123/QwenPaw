@@ -14,6 +14,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
+from ..security.mutation_guard import ActionEffect
+
 if TYPE_CHECKING:
     from agentscope.message import Msg
 
@@ -22,6 +24,7 @@ if TYPE_CHECKING:
 
 CommandHandler = Callable[["HookContext", str], Awaitable["Msg | None"]]
 FallbackHandler = Callable[[str, "HookContext"], Awaitable["Msg | None"]]
+CommandEffectResolver = Callable[[str], ActionEffect]
 
 
 @dataclass(frozen=True)
@@ -32,6 +35,12 @@ class CommandSpec:
     ``category`` records the origin (``"daemon"`` / ``"control"`` /
     ``"conversation"`` / ``"skill"`` / ``"auto"`` / ``"user"``) so future
     introspection can group commands without re-parsing source.
+
+    ``effect`` is the command's default :class:`ActionEffect` for the
+    role-based mutation gate. ``effect_resolver``, when provided, derives
+    the effect from the raw argument string for compound commands. Resolver
+    failures and invalid return values fail closed as UNKNOWN. Unannotated
+    commands also default to UNKNOWN.
     """
 
     name: str
@@ -40,6 +49,20 @@ class CommandSpec:
     category: str = "user"
     help_text: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
+    effect: ActionEffect = ActionEffect.UNKNOWN
+    effect_resolver: CommandEffectResolver | None = None
+
+    def resolve_effect(self, args: str) -> ActionEffect:
+        """Return the effect for one invocation, failing closed."""
+        if self.effect_resolver is None:
+            return self.effect
+        try:
+            resolved = self.effect_resolver(args)
+        except Exception:  # noqa: BLE001 -- authorization must fail closed
+            return ActionEffect.UNKNOWN
+        if not isinstance(resolved, ActionEffect):
+            return ActionEffect.UNKNOWN
+        return resolved
 
 
 class SlashCommandRegistry:
@@ -142,10 +165,24 @@ class SlashCommandRegistry:
         raw_text: str,
         ctx: "HookContext",
     ) -> "Msg | None":
-        """Resolve and execute. Returns ``None`` if nothing matched."""
+        """Resolve and execute. Returns ``None`` if nothing matched.
+
+        Before invoking a matched handler, the command's :attr:`CommandSpec.
+        effect` is authorized against the request principal (role-based
+        mutation gate). A guarded non-privileged member is denied
+        MUTATE / UNKNOWN commands (handler not invoked, deny Msg returned);
+        READ / CHAT_INFRASTRUCTURE commands run. The gate is a no-op when
+        there is no authenticated principal (local mode). The ``/<skill>``
+        fallback path is never gated — it is a chat entry whose tools are
+        still gated individually at execution time.
+        """
         match = self.resolve(raw_text)
         if match is not None:
             spec, args = match
+            effect = spec.resolve_effect(args)
+            deny = _authorize_command(ctx, spec, effect)
+            if deny is not None:
+                return deny
             return await spec.handler(ctx, args)
         if (
             self._fallback is not None
@@ -156,7 +193,80 @@ class SlashCommandRegistry:
         return None
 
 
+def _authorize_command(
+    ctx: "HookContext",
+    spec: "CommandSpec",
+    effect: ActionEffect,
+) -> "Msg | None":
+    """Authorize the resolved effect for the request principal.
+
+    Returns a deny :class:`Msg` (handler must NOT run) or ``None`` (allowed).
+    The principal is sourced ONLY from the server-derived
+    ``ctx.request.channel_meta["acl_principal"]`` — mirroring
+    :mod:`qwenpaw.runtime.builder` and the ContextVars setup hook — so a
+    client-forged identity can never reach this path. Absent principal
+    (local / unauthenticated) → ``authorize_effect`` already allows.
+    """
+    from ..config.utils import load_config
+    from ..security.mutation_guard import (
+        RequestPrincipal,
+        authorize_effect,
+        emit_mutation_audit,
+    )
+
+    config = load_config().security.mutation_guard
+    request = getattr(ctx, "request", None)
+    channel_meta = getattr(request, "channel_meta", None)
+    acl_principal = (
+        channel_meta.get("acl_principal")
+        if isinstance(channel_meta, dict)
+        else None
+    )
+    principal = RequestPrincipal.from_context(acl_principal)
+    decision = authorize_effect(principal, effect, config)
+    if decision.allowed:
+        return None
+    emit_mutation_audit(
+        "slash_command_denied",
+        decision="deny",
+        user=principal.user_id,
+        roles=principal.roles,
+        source=principal.source,
+        agent=getattr(ctx, "agent_id", "") or "",
+        session=getattr(ctx, "session_id", "") or "",
+        channel=getattr(request, "channel", "") or "",
+        command=spec.name,
+        effect=effect.value,
+        reason=decision.reason,
+    )
+    return _deny_msg(config.deny_message, decision.reason, spec.name)
+
+
+def _deny_msg(
+    deny_message: str,
+    reason: str,
+    command_name: str,
+) -> "Msg":
+    """Build the slash-command mutation-deny reply."""
+    from agentscope.message import Msg, TextBlock
+
+    return Msg(
+        name="assistant",
+        role="assistant",
+        content=[
+            TextBlock(
+                type="text",
+                text=(
+                    f"{deny_message} mutation_permission_denied "
+                    f"(command /{command_name}: {reason})"
+                ),
+            ),
+        ],
+    )
+
+
 __all__ = [
+    "CommandEffectResolver",
     "CommandHandler",
     "CommandSpec",
     "FallbackHandler",

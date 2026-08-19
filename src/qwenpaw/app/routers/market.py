@@ -16,6 +16,8 @@ from ...market import (
     search_market,
 )
 from ...market.providers import PROVIDERS
+from ...security.mutation_guard import RouteCapability
+from ..mutation_authorization import api_capability
 
 
 router = APIRouter(prefix="/market", tags=["market"])
@@ -87,6 +89,7 @@ async def get_market_categories(lang: str = "en") -> list[CategorySpec]:
 
 
 @router.post("/search", response_model=MarketSearchResponse)
+@api_capability(RouteCapability.READ)
 async def market_search(body: MarketSearchRequest) -> MarketSearchResponse:
     unknown = [k for k in body.provider_pages if k not in PROVIDERS]
     if unknown:

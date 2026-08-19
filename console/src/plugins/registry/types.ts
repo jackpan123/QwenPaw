@@ -69,6 +69,8 @@ export type MenuLocation =
   | "primary.settings" //   Sidebar Menu #2 (global settings + plugins-group)
   | "userMenu"; //          Reserved for future avatar-dropdown items
 
+export type Capability = "read" | "mutate";
+
 export interface MenuItem {
   /** Globally unique id, e.g. "core.workspace" / "cloudpaw.a2a". */
   id: string;
@@ -108,6 +110,8 @@ export interface MenuItem {
   isGroup?: boolean;
   /** Render as horizontal divider. id is still required for de-dup. */
   divider?: boolean;
+  /** Authorization required to expose this item. Omitted items default to mutate. */
+  capability?: Capability;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -123,6 +127,17 @@ export interface Route {
   /** Lazy or eager component. */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   component: React.ComponentType<any>;
+  /** Authorization required to expose this route. Omitted routes default to mutate. */
+  capability?: Capability;
+}
+
+export interface ResolvedRoute {
+  id: string;
+  path: string;
+  source: string;
+  capability?: Capability;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  Component: React.ComponentType<any>;
 }
 
 /**

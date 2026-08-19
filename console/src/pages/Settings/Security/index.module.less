@@ -252,6 +252,96 @@
   line-height: 1.6;
 }
 
+.mutationGuardForm {
+  max-width: 720px;
+  padding: 20px 24px;
+  border: 1px solid var(--color-border-secondary, #e8e8e8);
+  background: var(--color-bg-container, transparent);
+  border-radius: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.mutationGuardRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  font-weight: 500;
+}
+
+.mutationGuardField {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+
+  > label {
+    font-weight: 500;
+  }
+}
+
+.mutationGuardRoleInput {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.mutationGuardRoles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.mutationGuardRemoveRole {
+  appearance: none;
+  border: 0;
+  padding: 0 2px;
+  margin-left: 4px;
+  background: transparent;
+  color: currentColor;
+  cursor: pointer;
+  line-height: 1;
+
+  &:focus-visible {
+    outline: 2px solid var(--color-primary, #ff7f16);
+    outline-offset: 1px;
+    border-radius: 2px;
+  }
+
+  &:disabled {
+    cursor: not-allowed;
+    opacity: 0.45;
+  }
+}
+
+.mutationGuardActions {
+  max-width: 720px;
+  display: flex;
+  justify-content: flex-end;
+  padding: 16px 0 24px;
+}
+
+.mutationGuardState {
+  min-height: 160px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+}
+
+.mutationGuardError {
+  max-width: 720px;
+  color: var(--color-error, #ff4d4f);
+  margin-top: 12px;
+}
+
+.mutationGuardFieldError {
+  color: var(--color-error, #ff4d4f);
+  font-size: 12px;
+}
+
 .sectionConfigureContainer {
   padding: 0 0 24px 0;
 }

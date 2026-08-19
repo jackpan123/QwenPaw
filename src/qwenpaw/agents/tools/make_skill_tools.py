@@ -166,6 +166,7 @@ def _tool_text_response(text: str) -> ToolChunk:
     requires_skills=("make-skill",),
     requires_sandbox=("file_write",),
     async_execution=True,
+    side_effect="mutate",
     tool_type="internal",
     policy_name="MaterializeSkill",
     ui_description="Materialize a skill definition into the workspace",

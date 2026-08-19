@@ -126,6 +126,7 @@ export const BUILTIN_MENU: MenuItem[] = [
     location: "primary.agentScoped",
     label: navLabel("nav.agent"),
     isGroup: true,
+    capability: "read",
     order: 30,
   },
   {
@@ -207,6 +208,7 @@ export const BUILTIN_MENU: MenuItem[] = [
     location: "primary.settings",
     label: navLabel("nav.settings"),
     isGroup: true,
+    capability: "read",
     order: 10,
   },
   {

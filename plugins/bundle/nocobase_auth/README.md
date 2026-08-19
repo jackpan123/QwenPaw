@@ -5,9 +5,18 @@ Make NocoBase the sole authority for who can use QwenPaw and over which channel.
 ## What it does
 
 - **Login**: username/password is verified against NocoBase (`auth:signIn`); the NocoBase-issued token is passed through to the client, so NocoBase owns token issuing and verification.
-- **Per-request identity**: a NocoBase token (from the `X-NocoBase-Token` header, an `Authorization: Bearer` header, or a `?token=` query param) is verified live via `auth:check`, yielding the caller's `sender_id` (the configurable `user_id_field`, default `email`) and their NocoBase roles. Cached briefly (~60s).
+- **Per-request identity**: a NocoBase token (from the `X-NocoBase-Token` header, an `Authorization: Bearer` header, or a `?token=` query param) is verified by NocoBase via `auth:check?appends=roles`, yielding the caller's `sender_id` (the configurable `user_id_field`, default `email`) and current NocoBase roles. Successful results are cached briefly (~60s).
 - **Console access control**: the `console` channel is **fail-closed** — a request with no resolved NocoBase identity is denied. A resolved user is allowed unless the role→channel map (`role_channel_map`) explicitly denies one of their roles; an empty map allows any authenticated NocoBase user.
+- **Role-based mutation control**: when QwenPaw authentication and Mutation Guard are enabled, authenticated NocoBase users without a privileged role remain able to chat and use read-only capabilities, but persistent mutations and external side effects are denied.
 - **Admin views**: `GET /nocobase-auth/users` and `/roles` query NocoBase live (using the admin `api_token`).
+
+## Mutation Guard contract
+
+Mutation Guard is configured separately from this plugin under **Settings → Security → Mutation Guard**, or through `GET/PUT /api/config/security/mutation-guard`. Its default privileged roles are `admin` and `root`. Role matching is an exact, case-insensitive comparison, so `Admin` matches `admin`, while `administrator` does not.
+
+A non-privileged role such as `member` may chat, query data, and request tutorials or examples. It may not ask the agent to perform real changes such as renaming itself, writing memory or files, changing configuration, sending external messages, or calling write APIs. The intent classifier provides an early, user-friendly rejection only; the HTTP, action, tool, driver, and command execution gates are the security boundary. Disabling QwenPaw authentication leaves local operation outside this NocoBase role gate.
+
+The token used for this decision is the caller's ordinary NocoBase user token. It is not the plugin `api_token`, and it does not have to be an administrator token; authorization follows the roles returned for that user by `auth:check?appends=roles`.
 
 ## Configuration
 

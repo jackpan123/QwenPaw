@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """GuardedFunctionTool — permission-checked tool wrapper."""
+
 from __future__ import annotations
 
 import asyncio
@@ -47,6 +48,7 @@ class GuardedFunctionTool:
                         _guarded_tool_resolve_execution_level
                     ),
                     "check_permissions": _guarded_tool_check_permissions,
+                    "call": _guarded_tool_execute,
                     "__doc__": cls.__doc__,
                 },
             )
@@ -60,14 +62,21 @@ def _guarded_tool_init(
     *,
     agent_id: str | None = None,
     request_context: dict[str, str] | None = None,
+    effect_spec: Any = None,
     **kwargs: Any,
 ) -> None:
     from agentscope.tool import FunctionTool
+
+    from .tool_registry import get_tool_effect_spec
 
     FunctionTool.__init__(self, func, **kwargs)
     self._qp_agent_id = agent_id  # pylint: disable=protected-access
     # pylint: disable=protected-access
     self._qp_request_context = request_context or {}
+    # Role-based side-effect model for the authoritative mutation gate.
+    # Default UNKNOWN → fail-closed for unannotated tools.
+    # pylint: disable=protected-access
+    self._qp_effect_spec = effect_spec or get_tool_effect_spec(func)
 
 
 def _guarded_tool_resolve_execution_level(self: Any) -> str:
@@ -127,6 +136,18 @@ def _with_no_retry_instruction(body: str) -> str:
     return body + _NO_RETRY_INSTRUCTION
 
 
+async def _guarded_tool_execute(
+    self: Any,
+    **kwargs: Any,
+) -> Any:
+    """Execute with the final gate after middleware argument rewriting."""
+    from ..security.mutation_guard.tool_gate import (
+        execute_authorized_function_tool_call,
+    )
+
+    return await execute_authorized_function_tool_call(self, kwargs)
+
+
 # pylint: disable=too-many-return-statements
 async def _guarded_tool_check_permissions(
     self: Any,
@@ -159,6 +180,34 @@ async def _guarded_tool_check_permissions(
         PermissionBehavior,
         PermissionDecision,
     )
+
+    # ── Authoritative role-based mutation gate (runs FIRST) ──
+    # Runs before execution_level / bypass / tool-guard so a non-privileged
+    # member denied by the mutation guard is rejected even in dev modes.
+    # No-op for local / unauthenticated operation. ``GuardedFunctionTool`` is
+    # the fallback wrapper used when no governor is present (see
+    # ``AgentBuilder._wrap_tool``); the gate applies here too so the role
+    # restriction cannot be bypassed via the fallback path.
+    from .tool_registry import ToolEffectSpec
+    from ..security.mutation_guard.tool_gate import (
+        authorize_tool_call_and_audit,
+        mutation_denial_message,
+    )
+
+    request_ctx = getattr(self, "_qp_request_context", None) or {}
+    mutation_decision = authorize_tool_call_and_audit(
+        request_context=request_ctx,
+        effect_spec=(
+            getattr(self, "_qp_effect_spec", None) or ToolEffectSpec()
+        ),
+        input_data=input_data,
+        tool_name=getattr(self, "name", ""),
+    )
+    if not mutation_decision.allowed:
+        return PermissionDecision(
+            behavior=PermissionBehavior.DENY,
+            message=mutation_denial_message(mutation_decision),
+        )
 
     level = self._resolve_execution_level()  # pylint: disable=protected-access
 

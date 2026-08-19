@@ -14,6 +14,7 @@ Covers the highest-value flows:
 # pylint: disable=protected-access,redefined-outer-name,unused-argument
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -29,6 +30,8 @@ from qwenpaw.app.routers.agents import (
     copy_agent,
     router as agents_router,
 )
+from qwenpaw.config import Config
+from qwenpaw.config import utils as config_utils
 from qwenpaw.config.config import (
     AgentProfileConfig,
     AgentProfileRef,
@@ -86,6 +89,14 @@ def fake_config():
     }
     config.agents.agent_order = ["default", "bot"]
     return config
+
+
+def _transaction_on(config):
+    def transaction(update):
+        update(config)
+        return config
+
+    return transaction
 
 
 # ---------------------------------------------------------------------------
@@ -701,8 +712,8 @@ def test_get_memory_graph_reports_unavailable_reme(
 
 def test_reorder_agents_rejects_duplicate_ids(client, fake_config):
     with patch(
-        "qwenpaw.app.routers.agents.load_config",
-        return_value=fake_config,
+        "qwenpaw.app.routers.agents.update_config_transaction",
+        side_effect=_transaction_on(fake_config),
     ):
         response = client.put(
             "/api/agents/order",
@@ -715,8 +726,8 @@ def test_reorder_agents_rejects_duplicate_ids(client, fake_config):
 
 def test_reorder_agents_rejects_mismatched_ids(client, fake_config):
     with patch(
-        "qwenpaw.app.routers.agents.load_config",
-        return_value=fake_config,
+        "qwenpaw.app.routers.agents.update_config_transaction",
+        side_effect=_transaction_on(fake_config),
     ):
         response = client.put(
             "/api/agents/order",
@@ -729,10 +740,9 @@ def test_reorder_agents_rejects_mismatched_ids(client, fake_config):
 def test_reorder_agents_happy_path_saves(client, fake_config):
     with (
         patch(
-            "qwenpaw.app.routers.agents.load_config",
-            return_value=fake_config,
-        ),
-        patch("qwenpaw.app.routers.agents.save_config") as save_mock,
+            "qwenpaw.app.routers.agents.update_config_transaction",
+            side_effect=_transaction_on(fake_config),
+        ) as update_mock,
     ):
         response = client.put(
             "/api/agents/order",
@@ -741,7 +751,41 @@ def test_reorder_agents_happy_path_saves(client, fake_config):
 
     assert response.status_code == 200
     assert response.json()["success"] is True
-    save_mock.assert_called_once()
+    update_mock.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# PATCH /agents/{id}/pin
+# ---------------------------------------------------------------------------
+
+
+def test_pinning_already_pinned_default_agent_does_not_write(
+    client,
+    tmp_path,
+    monkeypatch,
+):
+    config_path = tmp_path / "config.json"
+    config = Config()
+    config.agents.profiles["default"].pinned = True
+    config_path.write_text(
+        json.dumps(config.model_dump(mode="json", by_alias=True)),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(config_utils, "get_config_path", lambda: config_path)
+    monkeypatch.setattr(config_utils, "_config_cache", None)
+    monkeypatch.setattr(config_utils, "_config_mtime", None)
+    monkeypatch.setattr(config_utils, "_config_cache_path", None)
+    write_mock = MagicMock()
+    monkeypatch.setattr(config_utils, "write_json_atomic", write_mock)
+
+    response = client.patch(
+        "/api/agents/default/pin",
+        json={"pinned": True},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["pinned"] is True
+    write_mock.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -780,14 +824,17 @@ def test_delete_agent_happy_path_calls_stop_and_saves(
             "qwenpaw.app.routers.agents.load_config",
             return_value=fake_config,
         ),
-        patch("qwenpaw.app.routers.agents.save_config") as save_mock,
+        patch(
+            "qwenpaw.app.routers.agents.update_config_transaction",
+            side_effect=_transaction_on(fake_config),
+        ) as update_mock,
     ):
         response = client.delete("/api/agents/bot")
 
     assert response.status_code == 200
     assert response.json() == {"success": True, "agent_id": "bot"}
     manager_mock.stop_agent.assert_awaited_once_with("bot")
-    save_mock.assert_called_once()
+    update_mock.assert_called_once()
     assert "bot" not in fake_config.agents.profiles
 
 
@@ -823,7 +870,10 @@ def test_toggle_enable_queues_bounded_startup(
             "qwenpaw.app.routers.agents.load_config",
             return_value=fake_config,
         ),
-        patch("qwenpaw.app.routers.agents.save_config") as save_mock,
+        patch(
+            "qwenpaw.app.routers.agents.update_config_transaction",
+            side_effect=_transaction_on(fake_config),
+        ) as update_mock,
     ):
         response = client.patch(
             "/api/agents/bot/toggle",
@@ -833,7 +883,7 @@ def test_toggle_enable_queues_bounded_startup(
     assert response.status_code == 200
     assert fake_config.agents.profiles["bot"].enabled is True
     manager_mock.schedule_agent_startup.assert_called_once_with("bot")
-    save_mock.assert_called_once()
+    update_mock.assert_called_once()
 
 
 def test_delete_rejects_agent_during_startup(
@@ -959,7 +1009,10 @@ def test_copy_agent_defaults_reset_channels_and_schedules_startup(
             "qwenpaw.app.routers.agents.load_agent_config",
             return_value=source_cfg,
         ),
-        patch("qwenpaw.app.routers.agents.save_config"),
+        patch(
+            "qwenpaw.app.routers.agents.update_config_transaction",
+            side_effect=_transaction_on(fake_config),
+        ),
         patch(
             "qwenpaw.app.routers.agents.save_agent_config",
             side_effect=fake_save_agent_config,
@@ -1054,7 +1107,10 @@ def test_copy_agent_copies_skills_and_jobs_when_requested(
             "qwenpaw.app.routers.agents.load_agent_config",
             return_value=source_cfg,
         ),
-        patch("qwenpaw.app.routers.agents.save_config"),
+        patch(
+            "qwenpaw.app.routers.agents.update_config_transaction",
+            side_effect=_transaction_on(fake_config),
+        ),
         patch("qwenpaw.app.routers.agents.save_agent_config"),
         patch(
             "qwenpaw.app.routers.agents._initialize_agent_workspace",
@@ -1087,6 +1143,176 @@ def test_copy_agent_copies_skills_and_jobs_when_requested(
     assert init_mock.call_args.kwargs["create_skills_dir"] is True
     assert init_mock.call_args.kwargs["create_jobs_file"] is True
     manager_mock.schedule_agent_startup.assert_called_once_with("copied2")
+
+
+def test_copy_agent_rejects_source_deleted_before_transaction(
+    client,
+    fake_config,
+    tmp_path,
+    monkeypatch,
+):
+    source_ws = tmp_path / "source"
+    _seed_source_workspace(source_ws)
+    fake_config.agents.profiles["bot"].workspace_dir = str(source_ws)
+    source_cfg = AgentProfileConfig(
+        id="bot",
+        name="Bot",
+        workspace_dir=str(source_ws),
+        language="en",
+    )
+    working_dir = tmp_path / "working"
+    working_dir.mkdir()
+    monkeypatch.setattr(
+        "qwenpaw.app.routers.agents.WORKING_DIR",
+        working_dir,
+    )
+
+    def delete_source_before_update(update):
+        del fake_config.agents.profiles["bot"]
+        update(fake_config)
+        return fake_config
+
+    with (
+        patch(
+            "qwenpaw.app.routers.agents.load_config",
+            return_value=fake_config,
+        ),
+        patch(
+            "qwenpaw.app.routers.agents.load_agent_config",
+            return_value=source_cfg,
+        ),
+        patch(
+            "qwenpaw.app.routers.agents.update_config_transaction",
+            side_effect=delete_source_before_update,
+        ),
+        patch("qwenpaw.app.routers.agents.save_agent_config") as save_mock,
+        patch("qwenpaw.app.routers.agents._initialize_agent_workspace"),
+        patch(
+            "qwenpaw.app.routers.agents._generate_unique_id",
+            return_value="deleted-source-copy",
+        ),
+    ):
+        response = client.post("/api/agents/bot/copy", json={})
+
+    assert response.status_code == 404
+    assert "deleted-source-copy" not in fake_config.agents.profiles
+    assert not (working_dir / "workspaces" / "deleted-source-copy").exists()
+    save_mock.assert_not_called()
+
+
+def test_copy_agent_rejects_source_workspace_changed_before_transaction(
+    client,
+    fake_config,
+    tmp_path,
+    monkeypatch,
+):
+    source_ws = tmp_path / "source"
+    _seed_source_workspace(source_ws)
+    fake_config.agents.profiles["bot"].workspace_dir = str(source_ws)
+    source_cfg = AgentProfileConfig(
+        id="bot",
+        name="Bot",
+        workspace_dir=str(source_ws),
+        language="en",
+    )
+    working_dir = tmp_path / "working"
+    working_dir.mkdir()
+    monkeypatch.setattr(
+        "qwenpaw.app.routers.agents.WORKING_DIR",
+        working_dir,
+    )
+
+    def move_source_before_update(update):
+        fake_config.agents.profiles["bot"].workspace_dir = str(
+            tmp_path / "moved-source",
+        )
+        update(fake_config)
+        return fake_config
+
+    with (
+        patch(
+            "qwenpaw.app.routers.agents.load_config",
+            return_value=fake_config,
+        ),
+        patch(
+            "qwenpaw.app.routers.agents.load_agent_config",
+            return_value=source_cfg,
+        ),
+        patch(
+            "qwenpaw.app.routers.agents.update_config_transaction",
+            side_effect=move_source_before_update,
+        ),
+        patch("qwenpaw.app.routers.agents.save_agent_config") as save_mock,
+        patch("qwenpaw.app.routers.agents._initialize_agent_workspace"),
+        patch(
+            "qwenpaw.app.routers.agents._generate_unique_id",
+            return_value="moved-source-copy",
+        ),
+    ):
+        response = client.post("/api/agents/bot/copy", json={})
+
+    assert response.status_code == 409
+    assert "moved-source-copy" not in fake_config.agents.profiles
+    assert not (working_dir / "workspaces" / "moved-source-copy").exists()
+    save_mock.assert_not_called()
+
+
+def test_copy_agent_rejects_preexisting_workspace_without_modifying_it(
+    client,
+    fake_config,
+    tmp_path,
+    monkeypatch,
+):
+    source_ws = tmp_path / "source"
+    _seed_source_workspace(source_ws)
+    fake_config.agents.profiles["bot"].workspace_dir = str(source_ws)
+    source_cfg = AgentProfileConfig(
+        id="bot",
+        name="Bot",
+        workspace_dir=str(source_ws),
+        language="en",
+    )
+    working_dir = tmp_path / "working"
+    target_ws = working_dir / "workspaces" / "preexisting-copy"
+    target_ws.mkdir(parents=True)
+    sentinel = target_ws / "owned-by-someone-else.txt"
+    sentinel.write_text("keep", encoding="utf-8")
+    monkeypatch.setattr(
+        "qwenpaw.app.routers.agents.WORKING_DIR",
+        working_dir,
+    )
+
+    with (
+        patch(
+            "qwenpaw.app.routers.agents.load_config",
+            return_value=fake_config,
+        ),
+        patch(
+            "qwenpaw.app.routers.agents.load_agent_config",
+            return_value=source_cfg,
+        ),
+        patch(
+            "qwenpaw.app.routers.agents.update_config_transaction",
+            side_effect=_transaction_on(fake_config),
+        ) as update_mock,
+        patch("qwenpaw.app.routers.agents.save_agent_config") as save_mock,
+        patch(
+            "qwenpaw.app.routers.agents._initialize_agent_workspace",
+        ) as init_mock,
+        patch(
+            "qwenpaw.app.routers.agents._generate_unique_id",
+            return_value="preexisting-copy",
+        ),
+    ):
+        response = client.post("/api/agents/bot/copy", json={})
+
+    assert response.status_code == 409
+    assert "preexisting-copy" not in fake_config.agents.profiles
+    assert list(target_ws.iterdir()) == [sentinel]
+    assert sentinel.read_text(encoding="utf-8") == "keep"
+    init_mock.assert_not_called()
+    update_mock.assert_not_called()
+    save_mock.assert_not_called()
 
 
 def test_copy_agent_returns_404_when_missing(client, fake_config):
@@ -1147,7 +1373,10 @@ async def test_copy_agent_skips_startup_without_http_request(
             "qwenpaw.app.routers.agents.load_agent_config",
             return_value=source_cfg,
         ),
-        patch("qwenpaw.app.routers.agents.save_config"),
+        patch(
+            "qwenpaw.app.routers.agents.update_config_transaction",
+            side_effect=_transaction_on(fake_config),
+        ),
         patch("qwenpaw.app.routers.agents.save_agent_config"),
         patch("qwenpaw.app.routers.agents._initialize_agent_workspace"),
         patch(
@@ -1274,7 +1503,7 @@ def test_copy_agent_optional_assets_match_request_flags(
             "qwenpaw.app.routers.agents.load_agent_config",
             return_value=source_cfg,
         ),
-        patch("qwenpaw.app.routers.agents.save_config"),
+        patch("qwenpaw.app.routers.agents.update_config_transaction"),
         patch("qwenpaw.app.routers.agents.save_agent_config"),
         patch(
             "qwenpaw.app.routers.agents._generate_unique_id",

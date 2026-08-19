@@ -23,7 +23,7 @@ import unicodedata
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, AsyncIterator, Literal
+from typing import Any, AsyncIterator, Literal, cast
 from urllib.parse import quote
 
 from fastapi import (
@@ -41,8 +41,9 @@ from pydantic import BaseModel, Field
 
 from ..utils import check_upload_size, safe_join, schedule_agent_reload
 from ...config import (
+    Config,
     load_config,
-    save_config,
+    update_config_transaction,
     AgentsRunningConfig,
 )
 from ...config.config import (
@@ -1283,19 +1284,22 @@ async def put_audio_mode(
 ) -> dict:
     """Update audio mode setting."""
     raw = body.get("audio_mode")
-    audio_mode = (str(raw) if raw is not None else "").strip().lower()
+    raw_audio_mode = (str(raw) if raw is not None else "").strip().lower()
     valid = {"auto", "native"}
-    if audio_mode not in valid:
+    if raw_audio_mode not in valid:
         raise HTTPException(
             status_code=400,
             detail=(
-                f"Invalid audio_mode '{audio_mode}'. "
+                f"Invalid audio_mode '{raw_audio_mode}'. "
                 f"Must be one of: {', '.join(sorted(valid))}"
             ),
         )
-    config = load_config()
-    config.agents.audio_mode = audio_mode
-    save_config(config)
+    audio_mode = cast(Literal["auto", "native"], raw_audio_mode)
+
+    def update(config: Config) -> None:
+        config.agents.audio_mode = audio_mode
+
+    update_config_transaction(update)
     return {"audio_mode": audio_mode}
 
 
@@ -1338,19 +1342,26 @@ async def put_transcription_provider_type(
 ) -> dict:
     """Set the transcription provider type."""
     raw = body.get("transcription_provider_type")
-    provider_type = (str(raw) if raw is not None else "").strip().lower()
+    raw_provider_type = (str(raw) if raw is not None else "").strip().lower()
     valid = {"disabled", "whisper_api", "local_whisper"}
-    if provider_type not in valid:
+    if raw_provider_type not in valid:
         raise HTTPException(
             status_code=400,
             detail=(
-                f"Invalid transcription_provider_type '{provider_type}'. "
+                "Invalid transcription_provider_type "
+                f"'{raw_provider_type}'. "
                 f"Must be one of: {', '.join(sorted(valid))}"
             ),
         )
-    config = load_config()
-    config.agents.transcription_provider_type = provider_type
-    save_config(config)
+    provider_type = cast(
+        Literal["disabled", "whisper_api", "local_whisper"],
+        raw_provider_type,
+    )
+
+    def update(config: Config) -> None:
+        config.agents.transcription_provider_type = provider_type
+
+    update_config_transaction(update)
     return {"transcription_provider_type": provider_type}
 
 
@@ -1411,9 +1422,11 @@ async def put_transcription_provider(
 ) -> dict:
     """Set the transcription provider."""
     provider_id = (body.get("provider_id") or "").strip()
-    config = load_config()
-    config.agents.transcription_provider_id = provider_id
-    save_config(config)
+
+    def update(config: Config) -> None:
+        config.agents.transcription_provider_id = provider_id
+
+    update_config_transaction(update)
     return {"provider_id": provider_id}
 
 

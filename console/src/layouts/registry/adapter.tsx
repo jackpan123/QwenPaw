@@ -11,7 +11,8 @@
 import type { CSSProperties, ReactNode } from "react";
 import { createElement, isValidElement } from "react";
 import type { MenuProps } from "antd";
-import type { MenuItem } from "../../plugins/registry/types";
+import { filterRoutesForAuthorization } from "../../plugins/registry/store";
+import type { MenuItem, ResolvedRoute } from "../../plugins/registry/types";
 
 /** ReactNode + the resolved navigation path for a leaf item (or undefined for groups). */
 export interface FlatMenuEntry {
@@ -74,6 +75,44 @@ interface ToAntdOpts {
 }
 
 type ItemWithChildren = MenuItem & { __children?: MenuItem[] };
+
+/**
+ * Filter a menu tree with the same route authorization policy used by the
+ * main router. Route-backed items inherit their route capability; standalone
+ * items and groups must explicitly declare themselves readable.
+ */
+export function filterMenuItemsForAuthorization(
+  items: MenuItem[],
+  routes: readonly ResolvedRoute[],
+  canMutate: boolean,
+): MenuItem[] {
+  if (canMutate) return [...items];
+
+  const readableRouteIds = new Set(
+    filterRoutesForAuthorization(routes, false).map((route) => route.id),
+  );
+
+  return items.flatMap((rawItem) => {
+    const item = rawItem as ItemWithChildren;
+    if (item.capability === "mutate") return [];
+    if (item.isGroup && !item.__children?.length) return [];
+
+    if (item.__children) {
+      if (item.capability !== "read") return [];
+      const children = filterMenuItemsForAuthorization(
+        item.__children,
+        routes,
+        false,
+      );
+      return children.length > 0 ? [{ ...item, __children: children }] : [];
+    }
+
+    const isReadable = item.route
+      ? readableRouteIds.has(item.route)
+      : item.capability === "read";
+    return isReadable ? [item] : [];
+  });
+}
 
 /**
  * Convert a tree of MenuItems (snapshot output) into the antd Menu `items` shape.

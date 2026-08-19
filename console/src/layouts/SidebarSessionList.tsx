@@ -28,6 +28,7 @@ import {
 } from "../utils/sessionGrouping";
 import { useCollapsedSessionGroups } from "../hooks/useCollapsedSessionGroups";
 import SessionItem from "../components/SessionItem";
+import { useAuthorizationStore } from "../stores/authorizationStore";
 import styles from "./sidebarSessionList.module.less";
 
 /** Fixed height of each session item row */
@@ -50,6 +51,7 @@ type FlatRow =
 
 /** Data passed to each virtual row */
 interface VirtualRowData {
+  canMutate: boolean;
   flatRows: FlatRow[];
   currentSessionId: string | undefined;
   editingSessionId: string | null;
@@ -101,7 +103,7 @@ const VirtualRow = React.memo(function VirtualRow({
   const channelLabel = channelKey
     ? getChannelLabel(channelKey, data.t)
     : undefined;
-  const isEditing = data.editingSessionId === session.id;
+  const isEditing = data.canMutate && data.editingSessionId === session.id;
 
   return (
     <div style={style}>
@@ -123,13 +125,13 @@ const VirtualRow = React.memo(function VirtualRow({
         editing={isEditing}
         editValue={isEditing ? data.editValue : undefined}
         onClick={data.handleSessionClick}
-        onEdit={data.handleEditStart}
-        onDelete={data.handleDelete}
-        onPin={data.handlePinToggle}
-        onArchive={data.handleArchiveToggle}
-        onEditChange={data.handleEditChange}
-        onEditSubmit={data.handleEditSubmit}
-        onEditCancel={data.handleEditCancel}
+        onEdit={data.canMutate ? data.handleEditStart : undefined}
+        onDelete={data.canMutate ? data.handleDelete : undefined}
+        onPin={data.canMutate ? data.handlePinToggle : undefined}
+        onArchive={data.canMutate ? data.handleArchiveToggle : undefined}
+        onEditChange={data.canMutate ? data.handleEditChange : undefined}
+        onEditSubmit={data.canMutate ? data.handleEditSubmit : undefined}
+        onEditCancel={data.canMutate ? data.handleEditCancel : undefined}
       />
     </div>
   );
@@ -149,6 +151,7 @@ export default function SidebarSessionList({
   const { t } = useTranslation();
   const location = useLocation();
   const currentSessionId = getSessionIdFromPath(location.pathname) ?? undefined;
+  const canMutate = useAuthorizationStore((state) => state.canMutate);
 
   const [searchQuery, setSearchQuery] = useState("");
   const [historyCollapsed, setHistoryCollapsed] = useState(false);
@@ -319,6 +322,7 @@ export default function SidebarSessionList({
   const virtualListData = useMemo(
     () => ({
       flatRows,
+      canMutate,
       currentSessionId,
       editingSessionId,
       editValue,
@@ -335,6 +339,7 @@ export default function SidebarSessionList({
     }),
     [
       flatRows,
+      canMutate,
       currentSessionId,
       editingSessionId,
       editValue,

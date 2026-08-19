@@ -17,6 +17,7 @@ from ..capabilities import (
     format_capability_id,
     parse_capability_id,
 )
+from ...security.mutation_guard import ActionEffect
 from ..constants import (
     CAPABILITY_KIND_TOOL,
     DRIVER_OPERATION_INVOKE,
@@ -332,8 +333,9 @@ def _mcp_tool_to_capability(
 ) -> DriverCapability:
     raw_tool = getattr(tool, "_tool", tool)
     name = str(getattr(raw_tool, "name", getattr(tool, "name", tool)))
-    if name.startswith(f"mcp__{driver_name}__"):
-        name = name[len(f"mcp__{driver_name}__") :]
+    tool_prefix = f"mcp__{driver_name}__"
+    if name.startswith(tool_prefix):
+        name = name.removeprefix(tool_prefix)
     display_namespace = _tool_namespace_from_display_name(
         display_name,
         fallback=driver_name,
@@ -360,6 +362,18 @@ def _mcp_tool_to_capability(
     input_schema.setdefault("type", "object")
     input_schema.setdefault("properties", {})
     input_schema.setdefault("required", [])
+    # Map MCP's declarative ``readOnlyHint`` to the role-based mutation
+    # gate.  A read-only MCP tool is safe for non-privileged members
+    # (READ); every other tool stays UNKNOWN (fail-closed) until a Driver
+    # explicitly classifies it.  ``annotations`` may live on either the
+    # wrapped raw tool or the AgentScope wrapper.
+    annotations = getattr(raw_tool, "annotations", None) or getattr(
+        tool,
+        "annotations",
+        None,
+    )
+    read_only = getattr(annotations, "readOnlyHint", None) is True
+    effect = ActionEffect.READ if read_only else ActionEffect.UNKNOWN
     return DriverCapability(
         # capability_id keeps the original MCP tool name (URL-encoded) so
         # invoke routing always resolves to the server-side name.
@@ -377,6 +391,7 @@ def _mcp_tool_to_capability(
         name=name,
         description=description,
         input_schema=input_schema,
+        effect=effect,
         # A letter-led namespace keeps the complete name compatible with
         # stricter OpenAI-compatible providers without discarding valid
         # leading characters from the original MCP tool name.

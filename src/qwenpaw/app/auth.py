@@ -19,25 +19,31 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Awaitable, Callable, Optional
+from typing import Awaitable, Callable, Optional, cast
 
 from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from ..constant import EnvVarLoader
+from ..security.mutation_guard import (
+    RequestPrincipal,
+    build_request_principal,
+)
 
 logger = logging.getLogger(__name__)
 
-# Paths that do NOT require authentication
-_PUBLIC_PATHS: frozenset[str] = frozenset(
+# Exact route methods that do NOT require authentication
+_PUBLIC_ROUTES: frozenset[tuple[str, str]] = frozenset(
     {
-        "/api/auth/login",
-        "/api/auth/status",
-        "/api/desktop/shutdown",
-        "/api/version",
-        "/api/settings/language",
-        "/api/settings/upload-limit",
-        "/api/frontend_plugin",
+        ("POST", "/api/auth/login"),
+        ("GET", "/api/auth/status"),
+        ("POST", "/api/desktop/shutdown"),
+        ("GET", "/api/version"),
+        ("GET", "/api/settings/language"),
+        ("GET", "/api/settings/upload-limit"),
+        ("GET", "/api/frontend_plugin"),
+        ("POST", "/voice/incoming"),
+        ("POST", "/voice/status-callback"),
     },
 )
 
@@ -51,6 +57,25 @@ _PUBLIC_PREFIXES: tuple[str, ...] = (
     "/qwenpaw-symbol.svg",
     "/api/frontend_plugin/",
 )
+
+# Manager HTTP actions are registered during lifespan outside ``/api``.
+# Their read routes still expose private application state and therefore
+# require the same identity resolution as API routes.  Match whole path
+# segments so an unrelated frontend route such as ``/cron-help`` remains a
+# public SPA navigation.
+_PROTECTED_NON_API_PREFIXES: tuple[str, ...] = ("/cron", "/crons")
+
+_OAUTH_CALLBACK_PATH = re.compile(
+    r"^/api/providers/[^/]+/oauth/callback$",
+)
+
+
+def _is_public_oauth_callback(method: str, path: str) -> bool:
+    """Return whether an unauthenticated IdP redirect may enter."""
+    return method == "GET" and (
+        path == "/api/mcp/oauth/callback"
+        or _OAUTH_CALLBACK_PATH.fullmatch(path) is not None
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -68,6 +93,7 @@ class ResolvedIdentity:
 
     sender_id: str
     roles: list[str] = field(default_factory=list)
+    source: str = "external"
 
 
 # A resolver maps an incoming request to a ResolvedIdentity (the sender_id
@@ -234,6 +260,12 @@ _LOOPBACK = frozenset({"127.0.0.1", "::1"})
 _BRACKETED = re.compile(r"^\[([^\]]+)\](?::\d+)?$")
 _V4_PORT = re.compile(r"^(\d{1,3}(?:\.\d{1,3}){3}):\d+$")
 
+# Sentinel returned by ``_handle_internal_principal`` when a credential
+# header was present but failed verification. Distinct from ``None``
+# (meaning "no credential header at all") so the middleware can 401
+# instead of degrading to anonymous/allowlist behavior.
+_INTERNAL_CREDENTIAL_INVALID = object()
+
 _MAX_WARN_IPS = 1024
 _warned_untrusted_ips: set[str] = set()
 
@@ -304,6 +336,22 @@ def _get_config_cached():
     return _auth_config_cache[1], _auth_config_cache[2]
 
 
+def build_identity_principal(
+    identity: ResolvedIdentity,
+    *,
+    auth_enabled: bool,
+) -> RequestPrincipal:
+    """Build a trusted request principal from a resolved identity."""
+    config, _ = _get_config_cached()
+    return build_request_principal(
+        user_id=identity.sender_id,
+        roles=identity.roles,
+        source=identity.source,
+        auth_enabled=auth_enabled,
+        config=config.security.mutation_guard,
+    )
+
+
 def _resolve_client_ip(request: Request) -> str:
     """Return the real client IP.
 
@@ -361,7 +409,31 @@ class AuthMiddleware(BaseHTTPMiddleware):
         call_next,
     ) -> Response:
         """Resolve identity via external providers on protected API routes."""
+        # Internal delegated credential: a parent agent minted a signed,
+        # target-bound principal to call this agent in-process. This is
+        # checked BEFORE the normal skip/allowlist logic so a subagent
+        # call under auth both authenticates AND inherits only the
+        # original user's privileges, WITHOUT forwarding the NocoBase
+        # token (the resolver is never consulted).
+        internal_principal = self._handle_internal_principal(request)
+        if internal_principal is _INTERNAL_CREDENTIAL_INVALID:
+            return Response(
+                content=json.dumps(
+                    {"detail": "Invalid internal credential"},
+                ),
+                status_code=401,
+                media_type="application/json",
+            )
+        if internal_principal is not None:
+            internal_principal = cast(RequestPrincipal, internal_principal)
+            request.state.user = internal_principal.user_id
+            request.state.user_roles = list(internal_principal.roles)
+            request.state.auth_source = internal_principal.source
+            request.state.request_principal = internal_principal
+            return await call_next(request)
+
         if self._should_skip_auth(request):
+            request.state.request_principal = RequestPrincipal()
             return await call_next(request)
 
         identity = await _resolve_external_identity(request)
@@ -378,7 +450,48 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
         request.state.user = identity.sender_id
         request.state.user_roles = identity.roles
+        request.state.auth_source = identity.source
+        request.state.request_principal = build_identity_principal(
+            identity,
+            auth_enabled=True,
+        )
         return await call_next(request)
+
+    @staticmethod
+    def _handle_internal_principal(
+        request: Request,
+    ) -> Optional[object]:
+        """Verify a delegated internal credential, if present.
+
+        Returns:
+            * a recomputed :class:`RequestPrincipal` when the
+              ``X-QwenPaw-Internal-Principal`` header is present and valid
+              (target-bound to this request's ``X-Agent-Id``);
+            * ``_INTERNAL_CREDENTIAL_INVALID`` when a credential header
+              is present but fails verification (signature, expiry, or
+              target mismatch) — the caller must 401;
+            * ``None`` when no credential header is present (normal path).
+
+        ``guarded``/``can_mutate`` are recomputed from the current config
+        — capability bits in the credential are never trusted. The
+        credential and NocoBase token are never logged.
+        """
+        from .internal_auth import (
+            INTERNAL_PRINCIPAL_HEADER,
+            verify_internal_principal,
+        )
+
+        credential = request.headers.get(INTERNAL_PRINCIPAL_HEADER)
+        if not credential:
+            return None
+        target_agent_id = request.headers.get("X-Agent-Id") or ""
+        principal = verify_internal_principal(
+            credential,
+            target_agent_id=target_agent_id,
+        )
+        if principal is None:
+            return _INTERNAL_CREDENTIAL_INVALID
+        return principal
 
     @staticmethod
     def _should_skip_auth(request: Request) -> bool:
@@ -387,11 +500,26 @@ class AuthMiddleware(BaseHTTPMiddleware):
             return True
 
         path = request.url.path
+        route_method = "GET" if request.method == "HEAD" else request.method
         if (
             request.method == "OPTIONS"
-            or path in _PUBLIC_PATHS
-            or any(path.startswith(p) for p in _PUBLIC_PREFIXES)
-            or not path.startswith("/api/")
+            or (route_method, path) in _PUBLIC_ROUTES
+            or _is_public_oauth_callback(route_method, path)
+            or (
+                request.method in {"GET", "HEAD"}
+                and any(path.startswith(p) for p in _PUBLIC_PREFIXES)
+            )
+        ):
+            return True
+
+        is_protected_non_api = any(
+            path == prefix or path.startswith(f"{prefix}/")
+            for prefix in _PROTECTED_NON_API_PREFIXES
+        )
+        if (
+            not path.startswith("/api/")
+            and request.method in {"GET", "HEAD"}
+            and not is_protected_non_api
         ):
             return True
 

@@ -30,6 +30,7 @@ import {
   type ExtendedSession,
 } from "../stores/sessionListStore";
 import { useSidebarModeStore } from "../stores/sidebarModeStore";
+import { useAuthorizationStore } from "../stores/authorizationStore";
 import { buildChatPath, getSessionIdFromPath } from "../utils/sessionRoute";
 import { useAgentStore } from "../stores/agentStore";
 import sessionApi from "../pages/Chat/sessionApi";
@@ -37,9 +38,11 @@ import { useInboxWobble } from "../hooks/useInboxWobble";
 import styles from "./index.module.less";
 import { useTheme } from "../contexts/ThemeContext";
 import { useMenuItems, useRoutes } from "../plugins/registry/hooks";
+import { filterRoutesForAuthorization } from "../plugins/registry/store";
 import { Slot } from "../plugins/registry/Slot";
 import {
   deriveOpenKeys,
+  filterMenuItemsForAuthorization,
   findMenuItem,
   flattenMenu,
   renderIcon,
@@ -117,6 +120,7 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
   const location = useLocation();
   const { t } = useTranslation();
   const { isDark } = useTheme();
+  const canMutate = useAuthorizationStore((state) => state.canMutate);
   const currentSessionId = getSessionIdFromPath(location.pathname);
   const chatPath = buildChatPath(currentSessionId);
   const [authEnabled, setAuthEnabled] = useState(false);
@@ -156,33 +160,56 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
   const rawAgentMenu = useMenuItems("primary.agentScoped");
   const rawSettingsMenu = useMenuItems("primary.settings");
   const routes = useRoutes();
+  const authorizedRoutes = useMemo(
+    () => filterRoutesForAuthorization(routes, canMutate),
+    [routes, canMutate],
+  );
+
+  const authorizedAgentMenu = useMemo(
+    () =>
+      filterMenuItemsForAuthorization(
+        rawAgentMenu,
+        authorizedRoutes,
+        canMutate,
+      ),
+    [rawAgentMenu, authorizedRoutes, canMutate],
+  );
+  const authorizedSettingsMenu = useMemo(
+    () =>
+      filterMenuItemsForAuthorization(
+        rawSettingsMenu,
+        authorizedRoutes,
+        canMutate,
+      ),
+    [rawSettingsMenu, authorizedRoutes, canMutate],
+  );
 
   // Apply simple-mode filtering when enabled
   const agentMenu = useMemo(() => {
     const visibleMenu = filterMenuForAgentCapabilities(
-      rawAgentMenu,
+      authorizedAgentMenu,
       backendCapabilities,
     );
     return sidebarMode === "simple"
       ? flattenMenuForSimpleMode(visibleMenu)
       : visibleMenu;
-  }, [backendCapabilities, rawAgentMenu, sidebarMode]);
+  }, [authorizedAgentMenu, backendCapabilities, sidebarMode]);
   const settingsMenu = useMemo(
     () =>
       sidebarMode === "simple"
-        ? flattenMenuForSimpleMode(rawSettingsMenu)
-        : rawSettingsMenu,
-    [rawSettingsMenu, sidebarMode],
+        ? flattenMenuForSimpleMode(authorizedSettingsMenu)
+        : authorizedSettingsMenu,
+    [authorizedSettingsMenu, sidebarMode],
   );
 
   // Flat nav entries for simple mode (icon + label + path)
   const simpleFlatNav = useMemo(() => {
     if (sidebarMode !== "simple") return [];
     return [
-      ...flattenMenu(agentMenu, routes, 16),
-      ...flattenMenu(settingsMenu, routes, 16),
+      ...flattenMenu(agentMenu, authorizedRoutes, 16),
+      ...flattenMenu(settingsMenu, authorizedRoutes, 16),
     ];
-  }, [agentMenu, settingsMenu, routes, sidebarMode]);
+  }, [agentMenu, settingsMenu, authorizedRoutes, sidebarMode]);
 
   // ── Effects ──────────────────────────────────────────────────────────────
 
@@ -406,8 +433,8 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
     );
     const flat = [
       stickyChat,
-      ...flattenMenu(agentMenu, routes, 18),
-      ...flattenMenu(settingsMenu, routes, 18),
+      ...flattenMenu(agentMenu, authorizedRoutes, 18),
+      ...flattenMenu(settingsMenu, authorizedRoutes, 18),
     ];
     return flat.map((entry) =>
       entry.key === "core.inbox"
@@ -417,7 +444,7 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
   }, [
     agentMenu,
     settingsMenu,
-    routes,
+    authorizedRoutes,
     chatPath,
     t,
     hasInboxUnread,
@@ -432,7 +459,7 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
       window.open(item.href, "_blank", "noopener,noreferrer");
       return;
     }
-    const path = routeIdToPath(item?.route, routes);
+    const path = routeIdToPath(item?.route, authorizedRoutes);
     if (path) navigate(path);
   };
 

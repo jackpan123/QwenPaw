@@ -99,7 +99,7 @@ def test_api_auth_status_disabled_contract(app_server) -> None:
 
     Test flow:
     1. GET /api/auth/status.
-    2. Assert enabled is false and has_users is bool.
+    2. Assert auth is disabled and the external auth mode is NocoBase.
 
     API endpoints:
     - GET /api/auth/status
@@ -107,8 +107,7 @@ def test_api_auth_status_disabled_contract(app_server) -> None:
     resp = app_server.api_request("GET", "/api/auth/status")
     assert resp.status_code == 200, app_server.logs_tail()
     body = resp.json()
-    assert body.get("enabled") is False
-    assert isinstance(body.get("has_users"), bool)
+    assert body == {"enabled": False, "mode": "nocobase"}
 
 
 @pytest.mark.integration

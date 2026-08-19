@@ -15,6 +15,7 @@ import { chatApi } from "../../../../api/modules/chat";
 import sessionApi from "../../sessionApi";
 import { useAgentStore } from "../../../../stores/agentStore";
 import { useSessionListStore } from "../../../../stores/sessionListStore";
+import { useAuthorizationStore } from "../../../../stores/authorizationStore";
 import {
   useSessionListData,
   type ExtendedChatSession,
@@ -59,6 +60,14 @@ function renderListData(sessions: ExtendedChatSession[]) {
 
 beforeEach(() => {
   sessionApi.resetForTests();
+  // Session CRUD is gated by the mutation guard; these tests exercise the
+  // cross-agent ownership logic, so run them as a privileged caller.
+  useAuthorizationStore.getState().set({
+    authEnabled: false,
+    username: null,
+    roles: [],
+    canMutate: true,
+  });
   useAgentStore.setState({ selectedAgent: "agent-a", lastChatIdByAgent: {} });
   useSessionListStore.setState({
     sessions: [],

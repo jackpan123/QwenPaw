@@ -3155,6 +3155,21 @@
     "saveSuccess": "Tool guard settings saved",
     "saveFailed": "Failed to save tool guard settings",
     "loadFailed": "Failed to load tool guard settings",
+    "mutationGuard": {
+      "title": "Mutation Guard",
+      "description": "Restrict conversations that request persistent or external changes to privileged roles.",
+      "enabled": "Enable Mutation Guard",
+      "privilegedRoles": "Privileged roles",
+      "removeRole": "Remove role {{role}}",
+      "rolesPlaceholder": "Type a role and press Enter",
+      "intentPrecheck": "Enable intent precheck",
+      "classifierTimeout": "Classifier timeout (seconds)",
+      "timeoutInvalid": "Enter a whole number from 1 to 60",
+      "denyMessage": "Permission denial message",
+      "loadFailed": "Failed to load Mutation Guard settings",
+      "saveSuccess": "Mutation Guard settings saved",
+      "saveFailed": "Failed to save Mutation Guard settings"
+    },
     "rules": {
       "title": "Detection Rules",
       "description": "Rules define regex patterns that trigger security alerts. Built-in rules can be disabled; custom rules can be added, edited, or deleted.",

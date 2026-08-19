@@ -3012,6 +3012,21 @@
     "saveSuccess": "工具防护设置已保存",
     "saveFailed": "保存工具防护设置失败",
     "loadFailed": "加载工具防护设置失败",
+    "mutationGuard": {
+      "title": "变更防护",
+      "description": "仅允许特权角色通过对话请求持久化变更或外部系统变更。",
+      "enabled": "启用变更防护",
+      "privilegedRoles": "特权角色",
+      "removeRole": "删除角色 {{role}}",
+      "rolesPlaceholder": "输入角色后按回车添加",
+      "intentPrecheck": "启用意图预检",
+      "classifierTimeout": "分类超时（秒）",
+      "timeoutInvalid": "请输入 1 到 60 之间的整数",
+      "denyMessage": "无权限提示语",
+      "loadFailed": "加载变更防护设置失败",
+      "saveSuccess": "变更防护设置已保存",
+      "saveFailed": "保存变更防护设置失败"
+    },
     "rules": {
       "title": "检测规则",
       "description": "规则定义了触发安全警告的正则表达式模式。内置规则可以禁用；自定义规则可以添加、编辑或删除。",

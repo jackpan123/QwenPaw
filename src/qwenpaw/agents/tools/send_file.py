@@ -19,6 +19,7 @@ from .file_io import _resolve_file_path, _path_to_file_url
     async_execution=True,
     tool_type="file",
     target_param="file_path",
+    side_effect="external_side_effect",
     policy_name="SendFileToUser",
     default_policy="allow",
     policy_reason="File send to user (global)",

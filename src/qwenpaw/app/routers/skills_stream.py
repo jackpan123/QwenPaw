@@ -13,8 +13,9 @@ from pydantic import BaseModel, Field
 from qwenpaw.exceptions import (
     AppBaseException,
 )
-
 from ...agents.model_factory import create_model_and_formatter
+from ...security.mutation_guard import RouteCapability
+from ..mutation_authorization import api_capability
 
 
 logger = logging.getLogger(__name__)
@@ -168,6 +169,7 @@ def _extract_text_from_response(response) -> str:
 
 
 @router.post("/skills/ai/optimize/stream")
+@api_capability(RouteCapability.READ)
 async def ai_optimize_skill_stream(request: AIOptimizeSkillRequest):
     """Use AI to optimize an existing skill with streaming response.
 

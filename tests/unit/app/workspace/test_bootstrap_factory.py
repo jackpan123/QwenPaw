@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """Tests for WorkspaceBootstrapFactory."""
+
 from __future__ import annotations
 
 from qwenpaw.app.workspace.bootstrap_factory import WorkspaceBootstrapFactory
@@ -13,6 +14,9 @@ class TestWorkspaceBootstrapFactory:
         assert isinstance(kwargs, dict)
 
     def test_includes_builtin_hook_clses(self) -> None:
+        from qwenpaw.hooks.security.mutation_intent_hook import (
+            MutationIntentHook,
+        )
         from qwenpaw.checkpoints.hooks import (
             CheckpointAutoSnapshotHook,
             CheckpointQueryGateHook,
@@ -21,6 +25,7 @@ class TestWorkspaceBootstrapFactory:
         kwargs = WorkspaceBootstrapFactory.build_bootstrap_kwargs(None)
         hook_clses = kwargs.get("builtin_hook_clses", [])
         assert len(hook_clses) > 0, "Expected at least some hook classes"
+        assert MutationIntentHook in hook_clses
         assert CheckpointQueryGateHook in hook_clses
         assert CheckpointAutoSnapshotHook in hook_clses
 

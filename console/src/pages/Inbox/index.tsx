@@ -38,6 +38,7 @@ import { PushMessageCard } from "./components";
 import { useInboxData } from "./hooks/useInboxData";
 import { useTraceViewer } from "./hooks/useTraceViewer";
 import { useAgentStore } from "../../stores/agentStore";
+import { useAuthorizationStore } from "../../stores/authorizationStore";
 import {
   DEFAULT_AGENT_ID,
   getAgentDisplayName,
@@ -83,6 +84,7 @@ const renderMarkdownText = (text: string, className: string) => (
 
 export default function InboxPage() {
   const { t } = useTranslation();
+  const canMutate = useAuthorizationStore((state) => state.canMutate);
   const [activeTab, setActiveTab] = useState<TabKey>(resolveInitialTab);
   const [markAllReading, setMarkAllReading] = useState(false);
   const [selectedAgentFilter, setSelectedAgentFilter] = useState<
@@ -185,6 +187,7 @@ export default function InboxPage() {
     rootSessionId: string,
     scope?: "exact" | "similar",
   ) => {
+    if (!useAuthorizationStore.getState().canMutate) return;
     await commandsApi.sendApprovalCommand(
       "approve",
       requestId,
@@ -202,6 +205,7 @@ export default function InboxPage() {
     requestId: string,
     rootSessionId: string,
   ) => {
+    if (!useAuthorizationStore.getState().canMutate) return;
     await commandsApi.sendApprovalCommand("deny", requestId, rootSessionId);
     setApprovals((prev) =>
       prev.filter((item) => item.request_id !== requestId),
@@ -210,11 +214,25 @@ export default function InboxPage() {
   };
 
   const handleCancelTask = async (rootSessionId: string) => {
+    if (!useAuthorizationStore.getState().canMutate) return;
     const resolvedChatId =
       sessionApi.getRealIdForSession(rootSessionId) ?? rootSessionId;
     await chatApi.stopChat(resolvedChatId);
     setApprovals((prev) =>
       prev.filter((item) => item.root_session_id !== rootSessionId),
+    );
+  };
+
+  const handleAcknowledgeRequest = async (
+    requestId: string,
+    rootSessionId: string,
+  ) => {
+    if (!useAuthorizationStore.getState().canMutate) return;
+    await commandsApi
+      .sendApprovalCommand("deny", requestId, rootSessionId)
+      .catch(() => undefined);
+    setApprovals((prev) =>
+      prev.filter((item) => item.request_id !== requestId),
     );
   };
   const {
@@ -229,7 +247,7 @@ export default function InboxPage() {
     toggleTracePanel,
     copyTraceBlock,
     handleTraceScroll,
-  } = useTraceViewer(markMessageAsRead);
+  } = useTraceViewer(canMutate ? markMessageAsRead : undefined);
 
   useEffect(() => {
     if (typeof window !== "undefined") {
@@ -262,6 +280,7 @@ export default function InboxPage() {
   };
 
   const handleMarkAllRead = async () => {
+    if (!useAuthorizationStore.getState().canMutate) return;
     if (summary.pushMessages.unread <= 0) {
       message.info(t("inbox.markAllReadNoUnread"));
       return;
@@ -303,6 +322,7 @@ export default function InboxPage() {
   };
 
   const handleBatchDeleteMessages = async () => {
+    if (!useAuthorizationStore.getState().canMutate) return;
     if (!selectedMessageIds.length) return;
     const deletedCount = await deleteMessages(selectedMessageIds);
     setSelectedMessageIds([]);
@@ -346,60 +366,62 @@ export default function InboxPage() {
                 placeholder={t("inbox.filterBySourceType")}
               />
             </div>
-            <div className={styles.messagesSelectionTools}>
-              {batchMode ? (
-                <>
-                  <Checkbox
-                    checked={allCurrentPageSelected}
-                    onChange={(event) =>
-                      handleToggleSelectCurrentPage(event.target.checked)
-                    }
-                    disabled={currentPageMessageIds.length <= 0}
-                  >
-                    {t("inbox.selectAllCurrentPage")}
-                  </Checkbox>
-                  <span className={styles.selectedCountText}>
-                    {t("inbox.selectedItems", {
-                      count: selectedMessageIds.length,
-                    })}
-                  </span>
-                  <Popconfirm
-                    title={t("inbox.batchDeleteConfirm", {
-                      count: selectedMessageIds.length,
-                    })}
-                    onConfirm={() => void handleBatchDeleteMessages()}
-                    okText={t("common.confirm")}
-                    cancelText={t("common.cancel")}
-                    disabled={selectedMessageIds.length <= 0}
-                  >
-                    <Button danger disabled={selectedMessageIds.length <= 0}>
-                      {t("inbox.batchDeleteButton")}
+            {canMutate ? (
+              <div className={styles.messagesSelectionTools}>
+                {batchMode ? (
+                  <>
+                    <Checkbox
+                      checked={allCurrentPageSelected}
+                      onChange={(event) =>
+                        handleToggleSelectCurrentPage(event.target.checked)
+                      }
+                      disabled={currentPageMessageIds.length <= 0}
+                    >
+                      {t("inbox.selectAllCurrentPage")}
+                    </Checkbox>
+                    <span className={styles.selectedCountText}>
+                      {t("inbox.selectedItems", {
+                        count: selectedMessageIds.length,
+                      })}
+                    </span>
+                    <Popconfirm
+                      title={t("inbox.batchDeleteConfirm", {
+                        count: selectedMessageIds.length,
+                      })}
+                      onConfirm={() => void handleBatchDeleteMessages()}
+                      okText={t("common.confirm")}
+                      cancelText={t("common.cancel")}
+                      disabled={selectedMessageIds.length <= 0}
+                    >
+                      <Button danger disabled={selectedMessageIds.length <= 0}>
+                        {t("inbox.batchDeleteButton")}
+                      </Button>
+                    </Popconfirm>
+                    <Button
+                      onClick={() => {
+                        setBatchMode(false);
+                        setSelectedMessageIds([]);
+                      }}
+                    >
+                      {t("inbox.exitBatch")}
                     </Button>
-                  </Popconfirm>
-                  <Button
-                    onClick={() => {
-                      setBatchMode(false);
-                      setSelectedMessageIds([]);
-                    }}
-                  >
-                    {t("inbox.exitBatch")}
-                  </Button>
-                </>
-              ) : (
-                <>
-                  <Button onClick={() => setBatchMode(true)}>
-                    {t("inbox.batchOperation")}
-                  </Button>
-                  <Button
-                    onClick={() => void handleMarkAllRead()}
-                    loading={markAllReading}
-                    disabled={summary.pushMessages.unread <= 0}
-                  >
-                    {t("inbox.markAllRead")}
-                  </Button>
-                </>
-              )}
-            </div>
+                  </>
+                ) : (
+                  <>
+                    <Button onClick={() => setBatchMode(true)}>
+                      {t("inbox.batchOperation")}
+                    </Button>
+                    <Button
+                      onClick={() => void handleMarkAllRead()}
+                      loading={markAllReading}
+                      disabled={summary.pushMessages.unread <= 0}
+                    >
+                      {t("inbox.markAllRead")}
+                    </Button>
+                  </>
+                )}
+              </div>
+            ) : null}
           </div>
           {filteredPushMessages.length > 0 ? (
             <div className={styles.cardList}>
@@ -407,12 +429,13 @@ export default function InboxPage() {
                 <PushMessageCard
                   key={item.id}
                   message={item}
-                  onMarkAsRead={markMessageAsRead}
-                  onDelete={deleteMessage}
                   onView={handleViewMessage}
-                  selected={selectedMessageIds.includes(item.id)}
+                  {...(canMutate ? { onDelete: deleteMessage } : {})}
+                  selected={canMutate && selectedMessageIds.includes(item.id)}
                   onSelectChange={
-                    batchMode ? handleToggleMessageSelection : undefined
+                    canMutate && batchMode
+                      ? handleToggleMessageSelection
+                      : undefined
                   }
                 />
               ))}
@@ -465,36 +488,32 @@ export default function InboxPage() {
                   isGeneralized={approval.is_generalized}
                   exactTarget={approval.exact_target}
                   similarTarget={approval.similar_target}
-                  onApprove={(_reqId, scope) =>
-                    handleApproveRequest(
-                      approval.request_id,
-                      approval.root_session_id,
-                      scope,
-                    )
-                  }
-                  onDeny={() =>
-                    handleRejectRequest(
-                      approval.request_id,
-                      approval.root_session_id,
-                    )
-                  }
-                  onCancel={() => {
-                    void handleCancelTask(approval.root_session_id);
-                  }}
-                  onAcknowledge={(requestId) => {
-                    return commandsApi
-                      .sendApprovalCommand(
-                        "deny",
-                        requestId,
-                        approval.root_session_id,
-                      )
-                      .catch(() => undefined)
-                      .then(() => {
-                        setApprovals((prev) =>
-                          prev.filter((item) => item.request_id !== requestId),
-                        );
-                      });
-                  }}
+                  {...(canMutate
+                    ? {
+                        onApprove: (
+                          _reqId: string,
+                          scope?: "exact" | "similar",
+                        ) =>
+                          handleApproveRequest(
+                            approval.request_id,
+                            approval.root_session_id,
+                            scope,
+                          ),
+                        onDeny: () =>
+                          handleRejectRequest(
+                            approval.request_id,
+                            approval.root_session_id,
+                          ),
+                        onCancel: () => {
+                          void handleCancelTask(approval.root_session_id);
+                        },
+                        onAcknowledge: (requestId: string) =>
+                          handleAcknowledgeRequest(
+                            requestId,
+                            approval.root_session_id,
+                          ),
+                      }
+                    : {})}
                 />
               ))}
             </div>
@@ -517,21 +536,26 @@ export default function InboxPage() {
           items={tabItems}
           className={styles.inboxTabs}
           tabBarExtraContent={
-            <Tooltip
-              title={t(
-                wobbleEnabled ? "inbox.wobbleDisable" : "inbox.wobbleEnable",
-              )}
-            >
-              <Button
-                type="text"
-                size="small"
-                icon={<BellRing size={16} />}
-                onClick={toggleWobble}
-                className={
-                  wobbleEnabled ? styles.wobbleToggleActive : undefined
-                }
-              />
-            </Tooltip>
+            canMutate ? (
+              <Tooltip
+                title={t(
+                  wobbleEnabled ? "inbox.wobbleDisable" : "inbox.wobbleEnable",
+                )}
+              >
+                <Button
+                  type="text"
+                  size="small"
+                  icon={<BellRing size={16} />}
+                  onClick={() => {
+                    if (!useAuthorizationStore.getState().canMutate) return;
+                    toggleWobble();
+                  }}
+                  className={
+                    wobbleEnabled ? styles.wobbleToggleActive : undefined
+                  }
+                />
+              </Tooltip>
+            ) : undefined
           }
         />
       </div>

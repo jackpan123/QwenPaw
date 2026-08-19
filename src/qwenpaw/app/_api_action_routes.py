@@ -170,6 +170,7 @@ def collect_slash_specs_from_api_actions(
     dispatch time then invokes the manager method with parsed args.
     """
     from ..runtime.slash_command_registry import CommandSpec
+    from ..runtime.tool_registry import _resolve_default_effect
 
     specs: list[CommandSpec] = []
     for mgr_cls, instance_getter in registry.iter_managers():
@@ -234,6 +235,7 @@ def collect_slash_specs_from_api_actions(
                         f"Auto-generated from "
                         f"{mgr_cls.__name__}.{action_spec.name}"
                     ),
+                    effect=_resolve_default_effect(action_spec.side_effect),
                 ),
             )
     return specs

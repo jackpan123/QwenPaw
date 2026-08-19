@@ -33,6 +33,8 @@ from ...drivers.constants import PROTOCOL_MCP
 from ...drivers.credentials.store import AsyncCredentialStore
 from ...drivers.credentials.types import CredentialRecord
 from ...drivers.errors import CredentialNotFoundError
+from ...security.mutation_guard import RouteCapability
+from ..mutation_authorization import api_capability
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +68,7 @@ class OAuthSession:
         token_endpoint: str,
         redirect_uri: str,
         scope: str,
+        initiator_user_id: str = "",
     ) -> None:
         """Initialise OAuth session."""
         self.agent_id = agent_id
@@ -76,6 +79,7 @@ class OAuthSession:
         self.token_endpoint = token_endpoint
         self.redirect_uri = redirect_uri
         self.scope = scope
+        self.initiator_user_id = initiator_user_id
         self.created_at = time.monotonic()
 
     def is_expired(self) -> bool:
@@ -430,6 +434,7 @@ def _popup_html(
     "/oauth/start/{client_key:path}",
     response_model=OAuthStartResponse,
 )
+@api_capability(RouteCapability.MUTATE)
 async def oauth_start(
     client_key: str,
     body: OAuthStartRequest,
@@ -497,6 +502,7 @@ async def oauth_start(
         token_endpoint=token_endpoint,
         redirect_uri=redirect_uri,
         scope=body.scope,
+        initiator_user_id=getattr(request.state, "user", "") or "",
     )
 
     # -- Build authorization URL ------------------------------------------
@@ -688,6 +694,7 @@ async def _reload_driver_best_effort(workspace, client_key: str) -> None:
 
 
 @router.get("/oauth/callback", response_class=HTMLResponse)
+@api_capability(RouteCapability.PUBLIC)
 async def oauth_callback(
     request: Request,
     code: Optional[str] = None,
@@ -709,7 +716,7 @@ async def oauth_callback(
     if not code or not state:
         return _make_error_page("Missing 'code' or 'state' parameter.")
 
-    session = _state_store.get(state)
+    session = _state_store.pop(state, None)
     if session is None or session.is_expired():
         return _make_error_page(
             "OAuth session expired or not found. Please try again.",
@@ -725,8 +732,6 @@ async def oauth_callback(
         )
         detail = getattr(exc, "detail", str(exc))
         return _make_error_page(str(detail))
-
-    _state_store.pop(state, None)
 
     success_body = (
         "<p style='color:#27ae60;font-size:1.8em;margin:0'>&#10003;</p>"
@@ -751,6 +756,7 @@ async def oauth_callback(
     "/oauth/status/{client_key:path}",
     response_model=OAuthStatusResponse,
 )
+@api_capability(RouteCapability.READ)
 async def oauth_status(
     client_key: str,
     request: Request,
@@ -779,6 +785,7 @@ async def oauth_status(
 
 
 @router.delete("/oauth/{client_key:path}", response_model=dict)
+@api_capability(RouteCapability.MUTATE)
 async def oauth_revoke(
     client_key: str,
     request: Request,

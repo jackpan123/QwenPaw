@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { renderWithProviders } from "@/test/common_setup";
 import ChatSessionDrawer from "./index";
 import { useChatAnywhereSessionsState } from "@agentscope-ai/chat";
+import { useAuthorizationStore } from "@/stores/authorizationStore";
 import { useAgentStore } from "../../../../stores/agentStore";
 
 // Mock react-window's VariableSizeList to render all items directly
@@ -144,26 +145,42 @@ vi.mock("../../../../components/SessionItem", () => ({
     onEdit,
     onDelete,
     onPin,
+    onArchive,
     onEditSubmit,
     onEditCancel,
   }: any) => (
     <div data-testid="session-item">
       <span onClick={() => onClick?.(sessionId)}>{name}</span>
-      <button data-testid="edit-btn" onClick={() => onEdit?.(sessionId, name)}>
-        edit
-      </button>
-      <button data-testid="delete-btn" onClick={() => onDelete?.(sessionId)}>
-        delete
-      </button>
-      <button data-testid="pin-btn" onClick={() => onPin?.(sessionId)}>
-        pin
-      </button>
-      <button data-testid="edit-submit-btn" onClick={onEditSubmit}>
-        submit
-      </button>
-      <button data-testid="edit-cancel-btn" onClick={onEditCancel}>
-        cancel
-      </button>
+      {onEdit ? (
+        <button data-testid="edit-btn" onClick={() => onEdit(sessionId, name)}>
+          edit
+        </button>
+      ) : null}
+      {onDelete ? (
+        <button data-testid="delete-btn" onClick={() => onDelete(sessionId)}>
+          delete
+        </button>
+      ) : null}
+      {onPin ? (
+        <button data-testid="pin-btn" onClick={() => onPin(sessionId)}>
+          pin
+        </button>
+      ) : null}
+      {onArchive ? (
+        <button data-testid="archive-btn" onClick={() => onArchive(sessionId)}>
+          archive
+        </button>
+      ) : null}
+      {onEditSubmit ? (
+        <button data-testid="edit-submit-btn" onClick={onEditSubmit}>
+          submit
+        </button>
+      ) : null}
+      {onEditCancel ? (
+        <button data-testid="edit-cancel-btn" onClick={onEditCancel}>
+          cancel
+        </button>
+      ) : null}
     </div>
   ),
 }));
@@ -213,6 +230,12 @@ function withSession(overrides: Record<string, unknown> = {}) {
 
 describe("ChatSessionDrawer", () => {
   beforeEach(() => {
+    useAuthorizationStore.getState().set({
+      authEnabled: false,
+      username: null,
+      roles: [],
+      canMutate: true,
+    });
     useAgentStore.setState({ selectedAgent: "default" });
   });
 
@@ -346,6 +369,28 @@ describe("ChatSessionDrawer", () => {
     );
     await user.click(screen.getByTestId("pin-btn"));
     expect(mockUpdateChat).toHaveBeenCalledWith("uuid-1", { pinned: true });
+  });
+
+  it("does not expose session mutation actions to a read-only member", async () => {
+    useAuthorizationStore.getState().set({
+      authEnabled: true,
+      username: "member-user",
+      roles: ["member"],
+      canMutate: false,
+    });
+    withSession({ realId: "uuid-1", pinned: false });
+
+    renderWithProviders(<ChatSessionDrawer {...defaultProps} />);
+
+    await waitFor(() =>
+      expect(screen.getByText("Session One")).toBeInTheDocument(),
+    );
+    expect(screen.queryByTestId("edit-btn")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("pin-btn")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("archive-btn")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("delete-btn")).not.toBeInTheDocument();
+    expect(mockUpdateChat).not.toHaveBeenCalled();
+    expect(mockDeleteChat).not.toHaveBeenCalled();
   });
 
   it("on open=true triggers session list refresh", async () => {

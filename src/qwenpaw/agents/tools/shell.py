@@ -952,6 +952,7 @@ async def _execute_posix_host(
     async_execution=True,
     tool_type="shell",
     target_param="command",
+    side_effect="mutate",
     policy_name="Bash",
     ui_description="Execute shell commands",
     ui_icon="💻",

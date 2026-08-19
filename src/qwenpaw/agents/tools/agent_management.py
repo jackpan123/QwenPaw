@@ -2,11 +2,15 @@
 """Tools and shared helpers for agent discovery and inter-agent chat."""
 
 import asyncio
+from collections import OrderedDict
+import ipaddress
 import json
 import logging
 import re
+import threading
 import time
 from typing import Any, Callable, Dict, Optional
+from urllib.parse import urlparse
 from uuid import uuid4
 
 import httpx
@@ -32,6 +36,22 @@ DEFAULT_AGENT_API_TIMEOUT = 30.0
 MAX_SPAWN_BATCH_SIZE = 10
 MAX_SPAWN_BATCH_CONCURRENCY = 3
 
+# Reserved channel_meta/request_context keys that may never be sourced
+# from the client payload or copied into an inter-agent request body.
+# The trusted principal travels via the signed header, never in plaintext.
+_RESERVED_PRINCIPAL_KEYS = frozenset({"request_principal", "acl_principal"})
+
+# Background tasks live in the same process as this client-side tool state.
+# Remember the target agent that accepted each opaque task id so later status
+# calls can mint a credential bound to the same routed agent.
+_BACKGROUND_TASK_AGENT_TTL_SECONDS = 24 * 60 * 60.0
+_BACKGROUND_TASK_AGENT_MAX_ENTRIES = 4096
+_BACKGROUND_TASK_AGENTS: OrderedDict[str, tuple[str, float]] = OrderedDict()
+_BACKGROUND_TASK_AGENTS_LOCK = threading.RLock()
+_TERMINAL_BACKGROUND_TASK_STATUSES = frozenset(
+    {"finished", "failed", "cancelled", "canceled"},
+)
+
 
 def resolve_agent_api_base_url(base_url: Optional[str] = None) -> str:
     """Resolve the agent API base URL.
@@ -47,7 +67,16 @@ def resolve_agent_api_base_url(base_url: Optional[str] = None) -> str:
     last_api = read_last_api()
     if last_api:
         host, port = last_api
-        return f"http://{host}:{port}"
+        formatted_host = str(host)
+        candidate = formatted_host.strip("[]")
+        try:
+            address = ipaddress.ip_address(candidate)
+        except ValueError:
+            pass
+        else:
+            if address.version == 6:
+                formatted_host = f"[{candidate}]"
+        return f"http://{formatted_host}:{port}"
 
     return DEFAULT_AGENT_API_BASE_URL
 
@@ -57,6 +86,106 @@ def _normalize_api_base_url(base_url: Optional[str]) -> str:
     if not base.endswith("/api"):
         base = f"{base}/api"
     return base
+
+
+# pylint: disable-next=too-many-return-statements
+def _is_local_agent_api_target(base_url: Optional[str]) -> bool:
+    """Return True when *base_url* targets the in-process agent API.
+
+    The internal HMAC credential must NEVER be sent to a non-local URL:
+    it would let a remote host impersonate the original user. "Local"
+    means the resolved host is the default base URL, a loopback address,
+    ``localhost``, the unspecified bind address (``0.0.0.0``), or absent
+    (which resolves to the default local base URL).
+    """
+    resolved = resolve_agent_api_base_url(base_url)
+    try:
+        parsed = urlparse(resolved)
+        if parsed.scheme.lower() not in {"http", "https"}:
+            return False
+        if not parsed.netloc or parsed.hostname is None:
+            return False
+        if parsed.username is not None or parsed.password is not None:
+            return False
+        # Accessing ``port`` validates its syntax and range.
+        _ = parsed.port
+    except (TypeError, ValueError):
+        return False
+    host = parsed.hostname.lower()
+    if host == "localhost":
+        return True
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return address.is_loopback or address.is_unspecified
+
+
+def _prune_background_task_agents(now: float) -> None:
+    """Drop expired bindings while the caller holds the binding lock."""
+    while _BACKGROUND_TASK_AGENTS:
+        _task_id, (_agent_id, expires_at) = next(
+            iter(_BACKGROUND_TASK_AGENTS.items()),
+        )
+        if expires_at > now:
+            break
+        _BACKGROUND_TASK_AGENTS.popitem(last=False)
+
+
+def _remember_background_task_agent(
+    task_id: str,
+    to_agent: str,
+    *,
+    now: Optional[float] = None,
+) -> bool:
+    """Bind an opaque task id without permitting cross-agent rebinding."""
+    if not task_id or not to_agent:
+        return False
+    current_time = time.monotonic() if now is None else now
+    with _BACKGROUND_TASK_AGENTS_LOCK:
+        _prune_background_task_agents(current_time)
+        existing = _BACKGROUND_TASK_AGENTS.get(task_id)
+        if existing is not None and existing[0] != to_agent:
+            return False
+        _BACKGROUND_TASK_AGENTS[task_id] = (
+            to_agent,
+            current_time + _BACKGROUND_TASK_AGENT_TTL_SECONDS,
+        )
+        _BACKGROUND_TASK_AGENTS.move_to_end(task_id)
+        while (
+            len(_BACKGROUND_TASK_AGENTS) > _BACKGROUND_TASK_AGENT_MAX_ENTRIES
+        ):
+            _BACKGROUND_TASK_AGENTS.popitem(last=False)
+    return True
+
+
+def _background_task_agent(
+    task_id: str,
+    *,
+    now: Optional[float] = None,
+) -> Optional[str]:
+    """Return the target agent previously recorded for *task_id*."""
+    current_time = time.monotonic() if now is None else now
+    with _BACKGROUND_TASK_AGENTS_LOCK:
+        _prune_background_task_agents(current_time)
+        binding = _BACKGROUND_TASK_AGENTS.get(task_id)
+        return binding[0] if binding is not None else None
+
+
+def _forget_background_task_agent(
+    task_id: str,
+    *,
+    expected_agent: Optional[str] = None,
+) -> bool:
+    """Remove a binding only when it still belongs to the expected agent."""
+    with _BACKGROUND_TASK_AGENTS_LOCK:
+        binding = _BACKGROUND_TASK_AGENTS.get(task_id)
+        if binding is None:
+            return False
+        if expected_agent is not None and binding[0] != expected_agent:
+            return False
+        del _BACKGROUND_TASK_AGENTS[task_id]
+        return True
 
 
 def _tool_text_response(text: str) -> ToolChunk:
@@ -255,18 +384,42 @@ def build_agent_chat_request(
 
 def _request_headers(
     to_agent: Optional[str],
+    base_url: Optional[str] = None,
 ) -> Dict[str, str]:
     """Build HTTP headers for agent chat requests.
 
+    For in-process (local) targets, attaches a signed, target-bound
+    internal principal credential so the receiving agent authenticates
+    as the original user WITHOUT forwarding the NocoBase token. The
+    credential is NEVER attached for a remote URL (prevents model /
+    network exfiltration of the identity).
+
     Args:
-        to_agent: Target agent ID
+        to_agent: Target agent ID (becomes the credential's bound target
+            and the ``X-Agent-Id`` header).
+        base_url: Effective API base URL; only local targets get the
+            credential.
 
     Returns:
-        Dictionary of HTTP headers
+        Dictionary of HTTP headers.
     """
-    headers = {}
+    headers: Dict[str, str] = {}
     if to_agent:
         headers["X-Agent-Id"] = to_agent
+    if not to_agent or not _is_local_agent_api_target(base_url):
+        return headers
+    from ...app.agent_context import get_current_request_principal
+    from ...app.internal_auth import (
+        INTERNAL_PRINCIPAL_HEADER,
+        mint_internal_principal,
+    )
+
+    principal = get_current_request_principal()
+    if principal is None or not principal.user_id:
+        # Never mint a credential for an anonymous/unknown identity.
+        return headers
+    credential = mint_internal_principal(principal, target_agent_id=to_agent)
+    headers[INTERNAL_PRINCIPAL_HEADER] = credential
     return headers
 
 
@@ -284,7 +437,7 @@ def stream_agent_chat(
             "POST",
             "/console/chat",
             json=request_payload,
-            headers=_request_headers(to_agent),
+            headers=_request_headers(to_agent, base_url),
             timeout=timeout,
         ) as response:
             response.raise_for_status()
@@ -313,7 +466,7 @@ def collect_final_agent_chat_response(
             "POST",
             "/console/chat",
             json=request_payload,
-            headers=_request_headers(to_agent),
+            headers=_request_headers(to_agent, base_url),
             timeout=timeout,
         ) as response:
             response.raise_for_status()
@@ -373,11 +526,20 @@ def submit_agent_chat_task(
         response = client.post(
             "/console/chat/task",
             json=payload,
-            headers=_request_headers(to_agent),
+            headers=_request_headers(to_agent, base_url),
             timeout=timeout,
         )
         response.raise_for_status()
-        return response.json()
+        result = response.json()
+        task_id = result.get("task_id") if isinstance(result, dict) else None
+        if isinstance(task_id, str) and not _remember_background_task_agent(
+            task_id,
+            to_agent,
+        ):
+            raise RuntimeError(
+                f"background task target binding collision for [{task_id}]",
+            )
+        return result
 
 
 def get_agent_chat_task_status(
@@ -387,14 +549,24 @@ def get_agent_chat_task_status(
     timeout: int = 10,
 ) -> Dict[str, Any]:
     """Get the current status for a background inter-agent chat task."""
+    target_agent = to_agent or _background_task_agent(task_id)
     with create_agent_api_client(base_url) as client:
         response = client.get(
             f"/console/chat/task/{task_id}",
-            headers=_request_headers(to_agent),
+            headers=_request_headers(target_agent, base_url),
             timeout=timeout,
         )
         response.raise_for_status()
-        return response.json()
+        result = response.json()
+        if (
+            isinstance(result, dict)
+            and result.get("status") in _TERMINAL_BACKGROUND_TASK_STATUSES
+        ):
+            _forget_background_task_agent(
+                task_id,
+                expected_agent=target_agent,
+            )
+        return result
 
 
 def format_agent_chat_text(
@@ -490,6 +662,7 @@ def format_background_status_text(
 
 @tool_descriptor(
     async_execution=True,
+    side_effect="read",
     tool_type="internal",
     policy_name="ListAgents",
     ui_description="List configured agents from the local API",
@@ -513,6 +686,7 @@ async def list_agents(
     async_execution=True,
     tool_type="internal",
     target_param="to_agent",
+    side_effect="external_side_effect",
     policy_name="ChatWithAgent",
     ui_description=(
         "Send a message to another configured agent and wait for "
@@ -633,6 +807,7 @@ async def chat_with_agent(
     async_execution=True,
     tool_type="internal",
     target_param="to_agent",
+    side_effect="external_side_effect",
     policy_name="SubmitToAgent",
     ui_description="Submit a background task to another configured agent",
     ui_icon="📨",
@@ -738,6 +913,7 @@ async def submit_to_agent(
     async_execution=True,
     tool_type="internal",
     target_param="task_id",
+    side_effect="read",
     policy_name="CheckAgentTask",
     ui_description="Check the status of a background agent task",
     ui_icon="⏳",
@@ -768,11 +944,18 @@ async def check_agent_task(
             "ERROR: 'task_id' is required to check task status",
         )
 
+    target_agent = _background_task_agent(normalized_task_id)
+    if not target_agent:
+        return _tool_text_response(
+            "ERROR: no target agent is recorded for task "
+            f"[{normalized_task_id}]",
+        )
+
     result = await asyncio.to_thread(
         get_agent_chat_task_status,
         None,
         normalized_task_id,
-        to_agent=None,
+        to_agent=target_agent,
         timeout=10,
     )
     # Background fork workers: commit on success, mark failed otherwise.
@@ -868,7 +1051,17 @@ def _build_spawn_request_context(current_agent_id: str) -> dict[str, Any]:
     }
     safe_meta = _json_safe_channel_meta(inherited.get("channel_meta") or {})
     if isinstance(safe_meta, dict) and safe_meta:
-        context["channel_meta"] = safe_meta
+        # The trusted principal must never be copied into the spawn
+        # request body in plaintext — it travels via the signed
+        # X-QwenPaw-Internal-Principal header instead. Strip any
+        # reserved principal key that slipped in via inherited meta.
+        safe_meta = {
+            k: v
+            for k, v in safe_meta.items()
+            if k not in _RESERVED_PRINCIPAL_KEYS
+        }
+        if safe_meta:
+            context["channel_meta"] = safe_meta
     if inherited.get("approval_level"):
         context["approval_level"] = inherited["approval_level"]
     return context
@@ -1027,6 +1220,7 @@ def _build_subagent_request_context(
 
 @tool_descriptor(
     async_execution=True,
+    side_effect="external_side_effect",
     tool_type="internal",
     policy_name="SpawnSubagent",
     ui_description="Spawn an ephemeral sub-task within the current workspace",
@@ -1395,7 +1589,11 @@ async def _call_fork_api(
             timeout=30.0,
             trust_env=trust_env_for_url(url),
         ) as client:
-            resp = await client.post(url, json=payload)
+            resp = await client.post(
+                url,
+                json=payload,
+                headers=_request_headers(agent_id, base_url),
+            )
             resp.raise_for_status()
             return resp.json()
     except Exception as exc:  # noqa: BLE001
@@ -1532,6 +1730,7 @@ async def _spawn_forked_subagent(
                     str(task_id),
                     worktree_path,
                     worktree_branch,
+                    to_agent=current_agent_id,
                     timeout=_watchdog_timeout_from_submit_result(result),
                     expected_scope=fork_scope_id or None,
                 ),
@@ -1611,6 +1810,7 @@ async def _watch_background_fork_finalize(
     worktree_path: str,
     worktree_branch: str,
     *,
+    to_agent: str,
     timeout: int,
     expected_scope: str | None = None,
 ) -> None:
@@ -1635,7 +1835,7 @@ async def _watch_background_fork_finalize(
                 get_agent_chat_task_status,
                 None,
                 task_id,
-                to_agent=None,
+                to_agent=to_agent,
                 timeout=10,
             )
         except Exception:  # noqa: BLE001

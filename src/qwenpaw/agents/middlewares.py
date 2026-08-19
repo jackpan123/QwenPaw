@@ -194,7 +194,6 @@ class MemoryMiddleware(MiddlewareBase):
         if len(seen_markers) > MAX_AUTO_MEMORY_TURN_MARKERS:
             oldest_key = next(iter(seen_markers))
             seen_markers.pop(oldest_key)
-        pending_markers.append(turn_marker)
 
         interval = self._auto_memory_interval()
         if interval <= 0:
@@ -207,12 +206,20 @@ class MemoryMiddleware(MiddlewareBase):
         # Drop orphaned markers before applying the interval so stale state
         # cannot make every subsequent user turn look like a full batch.
         self._discard_unresolved_pending_markers(agent, turn_state)
+
+        authorization_allowed = self._auto_memory_allowed(agent)
+        if not authorization_allowed:
+            pending_markers.clear()
+            return
+
+        pending_markers.append(turn_marker)
         if len(pending_markers) < interval:
             return
 
         await self._flush_auto_memory(
             agent,
             count=interval,
+            authorization_allowed=authorization_allowed,
         )
 
     async def on_compress_context(
@@ -284,6 +291,7 @@ class MemoryMiddleware(MiddlewareBase):
         agent: "Agent",
         *,
         count: int | None = None,
+        authorization_allowed: bool | None = None,
     ) -> None:
         if self._is_automation_request(agent):
             logger.debug(
@@ -296,6 +304,11 @@ class MemoryMiddleware(MiddlewareBase):
         turn_state = self._auto_memory_turn_state(agent)
         pending_markers = turn_state["pending"]
         if not pending_markers:
+            return
+        if authorization_allowed is None:
+            authorization_allowed = self._auto_memory_allowed(agent)
+        if not authorization_allowed:
+            pending_markers.clear()
             return
 
         # Flushes can also be triggered by context compression, without first
@@ -528,6 +541,61 @@ class MemoryMiddleware(MiddlewareBase):
             return False
         source = str(request_context.get("source") or "").strip().lower()
         return source in _AUTOMATION_MEMORY_SKIP_SOURCES
+
+    @staticmethod
+    def _auto_memory_allowed(agent: "Agent") -> bool:
+        """Authorize automatic persistent memory before backend execution."""
+        from ..config.utils import load_config
+        from ..security.mutation_guard import (
+            ActionEffect,
+            MutationDecision,
+            RequestPrincipal,
+            authorize_effect,
+            emit_mutation_audit,
+        )
+
+        request_context = getattr(agent, "_request_context", None)
+        if type(request_context) is not dict:
+            request_context = {}
+        principal = RequestPrincipal.from_context(
+            request_context.get("request_principal"),
+        )
+        # Local/auth-disabled and server-authorized principals can be
+        # accepted from the trusted request snapshot without configuration
+        # I/O. This also keeps their existing behavior if config reload fails.
+        if principal.can_mutate:
+            return True
+
+        try:
+            decision = authorize_effect(
+                principal,
+                ActionEffect.MUTATE,
+                load_config().security.mutation_guard,
+            )
+        except Exception:  # pylint: disable=broad-except
+            logger.exception(
+                "MemoryMiddleware mutation guard config unavailable",
+            )
+            decision = MutationDecision(
+                False,
+                "mutation_guard_config_unavailable",
+            )
+        if decision.allowed:
+            return True
+
+        emit_mutation_audit(
+            "auto_memory_denied",
+            effect=ActionEffect.MUTATE.value,
+            decision="deny",
+            reason=decision.reason,
+            user_id=principal.user_id,
+            roles=list(principal.roles),
+            source=principal.source,
+            agent_id=str(request_context.get("agent_id") or agent.name),
+            session_id=MemoryMiddleware._agent_session_id(agent),
+            channel=str(request_context.get("channel") or ""),
+        )
+        return False
 
     @staticmethod
     def _compression_state(

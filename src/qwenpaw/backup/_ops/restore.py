@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """Backup restore operations."""
+
 from __future__ import annotations
 
 import asyncio
@@ -8,6 +9,7 @@ import json
 import logging
 import shutil
 import zipfile
+from contextlib import nullcontext
 from pathlib import Path
 
 from .._utils.constants import (
@@ -29,10 +31,11 @@ from .._utils.safe_swap import (
 )
 from .._utils.signing import resolve_signature_action, sign_trusted_backup
 from ..models import BackupMeta, BackupValidationError, RestoreBackupRequest
+from ...config import utils as config_utils
 from ...config.config import AgentProfileRef
-from ...config.utils import load_config, save_config
-from ...constant import CONFIG_FILE, SECRET_DIR, WORKING_DIR
+from ...constant import SECRET_DIR
 from ...security.secret_store import reload_master_key_from_disk
+from ...utils.io_utils import get_sync_path_lock
 from .restore_helpers import (
     collect_workspace_agents_from_zip,
     handle_master_key_conflict,
@@ -385,6 +388,8 @@ def _stage_all(
     ws_agents: set[str],
     planned_dst_map: dict[str, tuple[Path, bool]],
     restore_aids: set[str],
+    *,
+    include_independent_dirs: bool = True,
 ) -> tuple[list[Path], Path | None, dict[str, Path], list[str]]:
     """Phase 1: stage all targets atomically.
 
@@ -392,6 +397,8 @@ def _stage_all(
     actually present in the backup archive; it is forwarded to
     ``_stage_global_config`` so that the custom-mode config merge only
     applies backup profiles for agents whose workspaces are really restored.
+    Independent secrets/skill-pool directories may be pre-staged separately
+    so their potentially slow copies do not hold the root-config lock.
 
     Returns ``(staged_dirs, staged_config_tmp, dst_map, new_aids)``.
     On any failure every staged artifact is discarded before re-raising.
@@ -403,9 +410,9 @@ def _stage_all(
 
     try:
         staged_config_tmp = _stage_global_config(zf, req, meta, restore_aids)
-        if req.include_secrets:
+        if include_independent_dirs and req.include_secrets:
             _stage_secrets(zf, staged_dirs)
-        if req.include_skill_pool:
+        if include_independent_dirs and req.include_skill_pool:
             _stage_skill_pool(zf, staged_dirs)
         _stage_agents(
             zf,
@@ -426,6 +433,24 @@ def _stage_all(
     return staged_dirs, staged_config_tmp, dst_map, new_aids
 
 
+def _stage_independent_directories(
+    zf: zipfile.ZipFile,
+    req: RestoreBackupRequest,
+) -> list[Path]:
+    """Stage directories whose destinations do not depend on root config."""
+    staged_dirs: list[Path] = []
+    try:
+        if req.include_secrets:
+            _stage_secrets(zf, staged_dirs)
+        if req.include_skill_pool:
+            _stage_skill_pool(zf, staged_dirs)
+    except BaseException:
+        for directory in staged_dirs:
+            discard_tmp(directory)
+        raise
+    return staged_dirs
+
+
 def _commit_and_finalize(
     staged_dirs: list[Path],
     staged_config_tmp: Path | None,
@@ -434,10 +459,9 @@ def _commit_and_finalize(
     backup_id: str,
 ) -> None:
     """Phase 2: atomically commit all staged dirs then update config."""
-    _commit_staged_global_config(staged_config_tmp)
-
     committed: list[Path] = []
     try:
+        _commit_staged_global_config(staged_config_tmp)
         for d in staged_dirs:
             commit_tmp(d)
             committed.append(d)
@@ -446,6 +470,8 @@ def _commit_and_finalize(
         remaining = [d for d in staged_dirs if d not in set(committed)]
         for d in remaining:
             discard_tmp(d)
+        if staged_config_tmp is not None:
+            staged_config_tmp.unlink(missing_ok=True)
         logger.exception(
             "Phase 2 commit failed after committing %d/%d dirs. "
             "Committed (already live): %s. Discarded (rolled back): %s.",
@@ -462,20 +488,11 @@ def _commit_and_finalize(
     for aid, dst in dst_map.items():
         rewrite_agent_workspace_dir(dst, aid)
 
-    config = load_config()
-    for aid in new_aids:
-        if aid not in config.agents.profiles:
-            config.agents.profiles[aid] = AgentProfileRef(
-                id=aid,
-                workspace_dir=str(dst_map[aid]),
-            )
-            logger.info(
-                "Registered new agent '%s' at %s",
-                aid,
-                dst_map[aid],
-            )
-
-    _apply_workspace_paths_and_save(config, dst_map, backup_id)
+    _apply_workspace_paths_and_save(
+        dst_map,
+        new_aids,
+        backup_id,
+    )
 
 
 def _restore_sync(backup_id: str, req: RestoreBackupRequest) -> BackupMeta:
@@ -540,39 +557,71 @@ def _restore_sync_locked(
         # have their workspaces restored; use this set to gate profile merging
         # in the global-config stage so that ghost entries are never created.
         restore_aids: set[str] = set(agent_ids) & ws_agents
-        config_before = load_config()
-        planned_dst_map = _plan_agent_destinations(
-            agent_ids,
-            ws_agents,
-            config_before,
-            req,
+        writes_root_config = (
+            req.include_global_config and PREFIX_CONFIG in zf.namelist()
+        ) or any(
+            aid in ws_agents
+            and _zip_has_prefix(zf, f"{PREFIX_WORKSPACES}{aid}/")
+            for aid in agent_ids
         )
-        _assert_restore_targets_available(
-            _restore_directory_targets(
-                zf,
-                req,
-                agent_ids,
-                ws_agents,
-                planned_dst_map,
-            ),
+        config_lock = (
+            get_sync_path_lock(config_utils.get_config_path())
+            if writes_root_config
+            else nullcontext()
         )
-        staged_dirs, staged_config_tmp, dst_map, new_aids = _stage_all(
-            zf,
-            req,
-            meta,
-            agent_ids,
-            ws_agents,
-            planned_dst_map,
-            restore_aids,
+        if writes_root_config:
+            _assert_restore_targets_available(
+                _restore_directory_targets(zf, req, [], set(), {}),
+            )
+        independent_dirs = (
+            _stage_independent_directories(zf, req)
+            if writes_root_config
+            else []
         )
-
-    _commit_and_finalize(
-        staged_dirs,
-        staged_config_tmp,
-        dst_map,
-        new_aids,
-        backup_id,
-    )
+        try:
+            with config_lock:
+                config_before = config_utils.load_config()
+                planned_dst_map = _plan_agent_destinations(
+                    agent_ids,
+                    ws_agents,
+                    config_before,
+                    req,
+                )
+                _assert_restore_targets_available(
+                    _restore_directory_targets(
+                        zf,
+                        req,
+                        agent_ids,
+                        ws_agents,
+                        planned_dst_map,
+                    ),
+                )
+                (
+                    staged_dirs,
+                    staged_config_tmp,
+                    dst_map,
+                    new_aids,
+                ) = _stage_all(
+                    zf,
+                    req,
+                    meta,
+                    agent_ids,
+                    ws_agents,
+                    planned_dst_map,
+                    restore_aids,
+                    include_independent_dirs=not writes_root_config,
+                )
+                _commit_and_finalize(
+                    independent_dirs + staged_dirs,
+                    staged_config_tmp,
+                    dst_map,
+                    new_aids,
+                    backup_id,
+                )
+        except BaseException:
+            for directory in independent_dirs:
+                discard_tmp(directory)
+            raise
     return meta
 
 
@@ -652,7 +701,7 @@ def _stage_global_config(
             " backup contains no config.json; skipping",
         )
         return None
-    dest = WORKING_DIR / CONFIG_FILE
+    dest = config_utils.get_config_path()
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_suffix(dest.suffix + ".tmp")
     try:
@@ -709,27 +758,51 @@ def _stage_global_config(
 def _commit_staged_global_config(
     staged_tmp: Path | None,
 ) -> None:
-    """Atomically replace config.json with the staged tmp file."""
+    """Validate and atomically commit a staged root configuration."""
     if staged_tmp is None:
         return
-    dest = WORKING_DIR / CONFIG_FILE
-    staged_tmp.replace(dest)
+    dest = config_utils.get_config_path()
+    staged_data = json.loads(staged_tmp.read_text(encoding="utf-8"))
+    config_utils.replace_config_transaction(staged_data, dest)
+    staged_tmp.unlink(missing_ok=True)
     logger.info("Global config committed to %s", dest)
 
 
 def _apply_workspace_paths_and_save(
-    config,
     dst_map: dict[str, Path],
+    new_aids: list[str],
     backup_id: str,
 ) -> None:
-    """Fix workspace_dir for restored agents in config and persist."""
-    for aid, dst in dst_map.items():
-        ref = config.agents.profiles.get(aid)
-        if ref is not None:
-            ref.workspace_dir = str(dst)
-
+    """Transactionally register agents and persist restored paths."""
     if dst_map:
-        save_config(config)
+
+        def update(raw_config: dict) -> None:
+            agents = raw_config.setdefault("agents", {})
+            if not isinstance(agents, dict):
+                raise ValueError("Root config agents must be an object")
+            profiles = agents.setdefault("profiles", {})
+            if not isinstance(profiles, dict):
+                raise ValueError(
+                    "Root config agent profiles must be an object",
+                )
+            for aid in new_aids:
+                if aid not in profiles:
+                    profiles[aid] = AgentProfileRef(
+                        id=aid,
+                        workspace_dir=str(dst_map[aid]),
+                    ).model_dump(mode="json", by_alias=True)
+            for aid, dst in dst_map.items():
+                profile = profiles.get(aid)
+                if isinstance(profile, dict):
+                    profile["workspace_dir"] = str(dst)
+
+        config_utils.update_raw_config_transaction(update)
+        for aid in new_aids:
+            logger.info(
+                "Registered new agent '%s' at %s",
+                aid,
+                dst_map[aid],
+            )
 
     logger.info(
         "Restore complete: backup_id=%s restored_agents=%s",

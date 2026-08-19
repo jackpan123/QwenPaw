@@ -4,6 +4,7 @@
 # pylint: disable=protected-access
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -22,6 +23,12 @@ from qwenpaw.agents.middlewares import (
     MemoryMiddleware,
     auto_memory_turn_state,
 )
+from qwenpaw.agents.memory.base_memory_manager import BaseMemoryManager
+from qwenpaw.agents.memory.reme_light_memory_manager import (
+    ReMeLightMemoryManager,
+)
+from qwenpaw.app.agent_context import set_current_request_principal
+from qwenpaw.config.config import MutationGuardConfig
 from qwenpaw.constant import (
     EXTERNAL_USER_QUERY_MESSAGE_TAG,
     LOOP_CONTINUATION_MESSAGE_TAG,
@@ -77,6 +84,36 @@ def _make_memory_manager(*, interval: int = 1):
 
 def _turn_state(agent):
     return auto_memory_turn_state(agent.state)
+
+
+def _set_principal(
+    agent,
+    *,
+    roles: list[str],
+    guarded: bool,
+    can_mutate: bool,
+) -> None:
+    agent._request_context.update(
+        {
+            "agent_id": "test-agent",
+            "channel": "console",
+            "request_principal": {
+                "user_id": "user-1",
+                "roles": roles,
+                "source": "nocobase",
+                "guarded": guarded,
+                "can_mutate": can_mutate,
+            },
+        },
+    )
+
+
+def _guard_config(*, enabled: bool = True):
+    return SimpleNamespace(
+        security=SimpleNamespace(
+            mutation_guard=MutationGuardConfig(enabled=enabled),
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -745,6 +782,433 @@ class TestDidCompressContext:
 
 
 class TestFlushAutoMemoryDefensiveGuard:
+    @pytest.mark.asyncio
+    async def test_member_turn_breaks_admin_memory_batch(self, caplog):
+        """Admin turns on either side must not span a denied member turn."""
+        mm = _make_memory_manager(interval=2)
+        mw = MemoryMiddleware(memory_manager=mm)
+        agent = _make_agent(source="user")
+
+        async def _next(**_kwargs):
+            yield "done"
+
+        async def _run_turn(
+            marker: str,
+            text: str,
+            *,
+            role: str,
+            can_mutate: bool,
+        ):
+            _set_principal(
+                agent,
+                roles=[role],
+                guarded=True,
+                can_mutate=can_mutate,
+            )
+            query = _user_msg(text, msg_id=marker)
+            reply = Msg(
+                name="agent",
+                role="assistant",
+                content=[TextBlock(text=f"reply {marker}")],
+            )
+            agent.state.context.extend([query, reply])
+            async for _ in mw.on_reply(agent, {}, _next):
+                pass
+            return query, reply
+
+        config_loader = MagicMock(return_value=_guard_config())
+        with patch(
+            "qwenpaw.config.utils.load_config",
+            config_loader,
+        ), caplog.at_level(
+            "INFO",
+            logger="qwenpaw.security.mutation_guard.audit",
+        ):
+            await _run_turn(
+                "admin-a",
+                "管理员 A",
+                role="admin",
+                can_mutate=True,
+            )
+            await _run_turn(
+                "member-b",
+                "普通成员 B",
+                role="member",
+                can_mutate=False,
+            )
+            pending_after_member = list(_turn_state(agent)["pending"])
+            admin_c = await _run_turn(
+                "admin-c",
+                "管理员 C",
+                role="admin",
+                can_mutate=True,
+            )
+            pending_after_admin_c = list(
+                _turn_state(agent)["pending"],
+            )
+            admin_d = await _run_turn(
+                "admin-d",
+                "管理员 D",
+                role="admin",
+                can_mutate=True,
+            )
+
+        assert not pending_after_member
+        assert pending_after_admin_c == ["admin-c"]
+        mm.auto_memory.assert_awaited_once()
+        assert mm.auto_memory.await_args.args[0] == [*admin_c, *admin_d]
+        assert config_loader.call_count == 1
+        audits = [
+            record.getMessage()
+            for record in caplog.records
+            if "[MUTATION AUDIT]" in record.getMessage()
+        ]
+        assert len(audits) == 1
+        assert "auto_memory_denied" in audits[0]
+
+    @pytest.mark.asyncio
+    async def test_member_marker_cannot_leak_into_later_admin_flush(
+        self,
+        caplog,
+    ):
+        """A role transition must not authorize an earlier member turn."""
+        mm = _make_memory_manager(interval=2)
+        mw = MemoryMiddleware(memory_manager=mm)
+        agent = _make_agent(source="user")
+        _set_principal(
+            agent,
+            roles=["member"],
+            guarded=True,
+            can_mutate=False,
+        )
+        member_query = _user_msg("普通成员消息", msg_id="member-turn")
+        member_reply = Msg(
+            name="agent",
+            role="assistant",
+            content=[TextBlock(text="member reply")],
+        )
+        agent.state.context = [member_query, member_reply]
+
+        async def _next(**_kwargs):
+            yield "done"
+
+        config_loader = MagicMock(return_value=_guard_config())
+        with patch(
+            "qwenpaw.config.utils.load_config",
+            config_loader,
+        ), caplog.at_level(
+            "INFO",
+            logger="qwenpaw.security.mutation_guard.audit",
+        ):
+            async for _ in mw.on_reply(agent, {}, _next):
+                pass
+            pending_after_member = list(_turn_state(agent)["pending"])
+
+            _set_principal(
+                agent,
+                roles=["admin"],
+                guarded=True,
+                can_mutate=True,
+            )
+            mm.get_auto_memory_interval.return_value = 1
+            admin_query = _user_msg("管理员消息", msg_id="admin-turn")
+            admin_reply = Msg(
+                name="agent",
+                role="assistant",
+                content=[TextBlock(text="admin reply")],
+            )
+            agent.state.context.extend([admin_query, admin_reply])
+            async for _ in mw.on_reply(agent, {}, _next):
+                pass
+
+        assert not pending_after_member
+        mm.auto_memory.assert_awaited_once()
+        assert mm.auto_memory.await_args.args[0] == [admin_query, admin_reply]
+        assert config_loader.call_count == 1
+        audits = [
+            record.getMessage()
+            for record in caplog.records
+            if "[MUTATION AUDIT]" in record.getMessage()
+        ]
+        assert len(audits) == 1
+        assert "auto_memory_denied" in audits[0]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "今天天气怎么样？",
+            "以后你叫小明。",
+        ],
+    )
+    async def test_guarded_member_never_persists_automatic_memory(
+        self,
+        message,
+    ):
+        """Safe or ambiguous member chat must not write long-term memory."""
+        mm = _make_memory_manager(interval=1)
+        mw = MemoryMiddleware(memory_manager=mm)
+        agent = _make_agent(source="user")
+        _set_principal(
+            agent,
+            roles=["member"],
+            guarded=True,
+            can_mutate=False,
+        )
+        agent.state.context = [_user_msg(message)]
+
+        async def _next(**_kwargs):
+            yield "done"
+
+        with patch(
+            "qwenpaw.config.utils.load_config",
+            return_value=_guard_config(),
+        ):
+            set_current_request_principal(None)
+            try:
+                async for _ in mw.on_reply(agent, {}, _next):
+                    pass
+            finally:
+                set_current_request_principal(None)
+
+        mm.auto_memory.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_guarded_member_fifth_turn_does_not_flush_memory(self):
+        """The configured five-turn cadence must not bypass role checks."""
+        mm = _make_memory_manager(interval=5)
+        mw = MemoryMiddleware(memory_manager=mm)
+        agent = _make_agent(source="user")
+        _set_principal(
+            agent,
+            roles=["member"],
+            guarded=True,
+            can_mutate=False,
+        )
+
+        async def _next(**_kwargs):
+            yield "done"
+
+        with patch(
+            "qwenpaw.config.utils.load_config",
+            return_value=_guard_config(),
+        ):
+            for turn in range(1, 6):
+                agent.state.context.append(
+                    _user_msg(f"safe chat {turn}", msg_id=f"turn-{turn}"),
+                )
+                async for _ in mw.on_reply(agent, {}, _next):
+                    pass
+
+        mm.auto_memory.assert_not_awaited()
+        assert not _turn_state(agent)["pending"]
+
+    @pytest.mark.asyncio
+    async def test_guarded_member_never_enqueues_reme_background_write(
+        self,
+        tmp_path,
+    ):
+        """The real ReMe auto_memory scheduler stays behind the gate."""
+        manager = object.__new__(ReMeLightMemoryManager)
+        BaseMemoryManager.__init__(
+            manager,
+            working_dir=str(tmp_path),
+            agent_id="test-agent",
+        )
+        manager.add_summarize_task = MagicMock()
+        mw = MemoryMiddleware(memory_manager=manager)
+        agent = _make_agent(source="user")
+        _set_principal(
+            agent,
+            roles=["member"],
+            guarded=True,
+            can_mutate=False,
+        )
+        _turn_state(agent)["pending"] = [
+            "turn-1",
+        ]
+        agent.state.context = [_user_msg("普通聊天")]
+
+        with patch(
+            "qwenpaw.config.utils.load_config",
+            return_value=_guard_config(),
+        ):
+            await mw._flush_auto_memory(agent)
+
+        manager.add_summarize_task.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("role", ["admin", "root"])
+    async def test_privileged_principal_keeps_automatic_memory(self, role):
+        mm = _make_memory_manager()
+        mw = MemoryMiddleware(memory_manager=mm)
+        agent = _make_agent(source="user")
+        _set_principal(
+            agent,
+            roles=[role],
+            guarded=True,
+            can_mutate=True,
+        )
+        _turn_state(agent)["pending"] = ["turn-1"]
+        agent.state.context = [_user_msg()]
+
+        with patch(
+            "qwenpaw.config.utils.load_config",
+            return_value=_guard_config(),
+        ):
+            await mw._flush_auto_memory(agent)
+
+        mm.auto_memory.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("principal_kind", ["local", "auth-disabled"])
+    async def test_unguarded_operation_keeps_automatic_memory(
+        self,
+        principal_kind,
+    ):
+        mm = _make_memory_manager()
+        mw = MemoryMiddleware(memory_manager=mm)
+        agent = _make_agent(source="user")
+        if principal_kind == "auth-disabled":
+            _set_principal(
+                agent,
+                roles=["member"],
+                guarded=False,
+                can_mutate=True,
+            )
+        _turn_state(agent)["pending"] = ["turn-1"]
+        agent.state.context = [_user_msg()]
+
+        with patch(
+            "qwenpaw.config.utils.load_config",
+            side_effect=RuntimeError("config unavailable"),
+        ):
+            await mw._flush_auto_memory(agent)
+
+        mm.auto_memory.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_disabled_guard_keeps_member_automatic_memory(self):
+        mm = _make_memory_manager()
+        mw = MemoryMiddleware(memory_manager=mm)
+        agent = _make_agent(source="user")
+        _set_principal(
+            agent,
+            roles=["member"],
+            guarded=True,
+            can_mutate=False,
+        )
+        _turn_state(agent)["pending"] = ["turn-1"]
+        agent.state.context = [_user_msg()]
+
+        with patch(
+            "qwenpaw.config.utils.load_config",
+            return_value=_guard_config(enabled=False),
+        ):
+            await mw._flush_auto_memory(agent)
+
+        mm.auto_memory.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_guarded_member_config_failure_is_fail_closed(self, caplog):
+        mm = _make_memory_manager()
+        mw = MemoryMiddleware(memory_manager=mm)
+        agent = _make_agent(source="user")
+        _set_principal(
+            agent,
+            roles=["member"],
+            guarded=True,
+            can_mutate=False,
+        )
+        _turn_state(agent)["pending"] = ["turn-1"]
+        agent.state.context = [_user_msg()]
+
+        with patch(
+            "qwenpaw.config.utils.load_config",
+            side_effect=RuntimeError("config unavailable"),
+        ), caplog.at_level(
+            "INFO",
+            logger="qwenpaw.security.mutation_guard.audit",
+        ):
+            await mw._flush_auto_memory(agent)
+
+        mm.auto_memory.assert_not_awaited()
+        assert not _turn_state(agent)["pending"]
+        assert "auto_memory_denied" in caplog.text
+        assert "mutation_guard_config_unavailable" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_member_denial_audit_is_structured_and_content_free(
+        self,
+        caplog,
+    ):
+        secret_chat = "请记住 password=super-secret"
+        mm = _make_memory_manager()
+        mw = MemoryMiddleware(memory_manager=mm)
+        agent = _make_agent(source="user")
+        _set_principal(
+            agent,
+            roles=["member"],
+            guarded=True,
+            can_mutate=False,
+        )
+        _turn_state(agent)["pending"] = ["turn-1"]
+        agent.state.context = [_user_msg(secret_chat)]
+
+        with patch(
+            "qwenpaw.config.utils.load_config",
+            return_value=_guard_config(),
+        ), caplog.at_level(
+            "INFO",
+            logger="qwenpaw.security.mutation_guard.audit",
+        ):
+            await mw._flush_auto_memory(agent)
+
+        messages = [
+            record.getMessage()
+            for record in caplog.records
+            if "[MUTATION AUDIT]" in record.getMessage()
+        ]
+        assert len(messages) == 1
+        payload = json.loads(messages[0].split("[MUTATION AUDIT] ", 1)[1])
+        assert payload == {
+            "agent_id": "test-agent",
+            "channel": "console",
+            "decision": "deny",
+            "effect": "mutate",
+            "event": "auto_memory_denied",
+            "reason": "effect_mutate_requires_privileged_role",
+            "roles": ["member"],
+            "session_id": "session-1",
+            "source": "nocobase",
+            "user_id": "user-1",
+        }
+        assert secret_chat not in caplog.text
+        assert "super-secret" not in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_interrupted_reply_stream_never_runs_automatic_memory(self):
+        mm = _make_memory_manager(interval=1)
+        mw = MemoryMiddleware(memory_manager=mm)
+        agent = _make_agent(source="user")
+        _set_principal(
+            agent,
+            roles=["admin"],
+            guarded=True,
+            can_mutate=True,
+        )
+        agent.state.context = [_user_msg()]
+
+        async def _next(**_kwargs):
+            yield "partial"
+            raise RuntimeError("stream interrupted")
+
+        with pytest.raises(RuntimeError, match="stream interrupted"):
+            async for _ in mw.on_reply(agent, {}, _next):
+                pass
+
+        mm.auto_memory.assert_not_awaited()
+
     @pytest.mark.asyncio
     async def test_automation_preserves_pending_and_skips(self):
         """Automation must not mutate pending user memory state."""

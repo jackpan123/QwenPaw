@@ -42,6 +42,7 @@ from .auth import (
     AuthMiddleware,
     check_proxy_config_sanity,
 )
+from .mutation_authorization import MutationAuthorizationMiddleware
 from .migration import (
     ensure_default_agent_exists,
     ensure_qa_agent_exists,
@@ -686,6 +687,10 @@ app = FastAPI(
 # Add agent context middleware for agent-scoped routes
 app.add_middleware(AgentContextMiddleware)
 
+# Starlette wraps middleware in reverse registration order. Auth must be
+# outside authorization so it establishes request.state.request_principal
+# before route capability checks run.
+app.add_middleware(MutationAuthorizationMiddleware)
 app.add_middleware(AuthMiddleware)
 
 # Apply CORS middleware if CORS_ORIGINS is set

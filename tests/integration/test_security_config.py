@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """HTTP smoke tests for security guards (file/tool guard + skill scanner)."""
+
 from __future__ import annotations
 
 import pytest
@@ -184,6 +185,61 @@ def test_global_tool_guard_put_get_roundtrip(app_server) -> None:
             json=before,
         )
         assert restore.status_code == 200, app_server.logs_tail()
+
+
+@pytest.mark.integration
+@pytest.mark.p0
+def test_mutation_guard_put_get_roundtrip(app_server) -> None:
+    """Mutation Guard updates persist independently of Tool Guard."""
+    endpoint = "/api/config/security/mutation-guard"
+    get_before = app_server.api_request("GET", endpoint)
+    assert get_before.status_code == 200, app_server.logs_tail()
+    before = get_before.json()
+    updated = {
+        "enabled": True,
+        "privileged_roles": ["admin", "root"],
+        "intent_precheck_enabled": True,
+        "classifier_timeout_seconds": 6,
+        "deny_message": "没有变更权限",
+    }
+
+    try:
+        put_response = app_server.api_request(
+            "PUT",
+            endpoint,
+            json=updated,
+        )
+        assert put_response.status_code == 200, app_server.logs_tail()
+        assert put_response.json() == updated
+
+        get_after = app_server.api_request("GET", endpoint)
+        assert get_after.status_code == 200, app_server.logs_tail()
+        assert get_after.json() == updated
+    finally:
+        restore = app_server.api_request("PUT", endpoint, json=before)
+        assert restore.status_code == 200, app_server.logs_tail()
+
+
+@pytest.mark.integration
+@pytest.mark.p0
+@pytest.mark.parametrize("roles", [[], ["   "]])
+def test_mutation_guard_rejects_empty_privileged_roles(
+    app_server,
+    roles,
+) -> None:
+    response = app_server.api_request(
+        "PUT",
+        "/api/config/security/mutation-guard",
+        json={
+            "enabled": True,
+            "privileged_roles": roles,
+            "intent_precheck_enabled": True,
+            "classifier_timeout_seconds": 8,
+            "deny_message": "没有变更权限",
+        },
+    )
+
+    assert response.status_code == 422, app_server.logs_tail()
 
 
 @pytest.mark.integration

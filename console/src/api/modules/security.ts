@@ -22,6 +22,14 @@ export interface ToolGuardConfig {
   shell_evasion_checks: Record<string, boolean>;
 }
 
+export interface MutationGuardConfig {
+  enabled: boolean;
+  privileged_roles: string[];
+  intent_precheck_enabled: boolean;
+  classifier_timeout_seconds: number;
+  deny_message: string;
+}
+
 // ── Sandbox switch types ──────────────────────────────
 
 export interface SandboxSetting {
@@ -101,6 +109,15 @@ export interface AllowNoAuthHostsUpdateBody {
 }
 
 export const securityApi = {
+  getMutationGuard: () =>
+    request<MutationGuardConfig>("/config/security/mutation-guard"),
+
+  updateMutationGuard: (body: MutationGuardConfig) =>
+    request<MutationGuardConfig>("/config/security/mutation-guard", {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+
   // ── Tool Guard ──────────────────────────────────────────────────
 
   getToolGuard: () => request<ToolGuardConfig>("/config/security/tool-guard"),
