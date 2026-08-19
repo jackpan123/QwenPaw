@@ -69,7 +69,8 @@ def test_provider_callback_requires_one_time_state_before_persisting(
     updates = []
 
     class Manager:
-        def update_provider(self, provider_id, credential):
+        # Upstream moved the OAuth callback onto the async writer.
+        async def update_provider_async(self, provider_id, credential):
             updates.append((provider_id, credential))
             return True
 

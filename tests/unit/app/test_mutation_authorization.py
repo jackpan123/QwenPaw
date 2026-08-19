@@ -730,7 +730,7 @@ def test_member_cannot_update_mutation_guard_config():
     events = []
     with (
         patch(
-            "qwenpaw.app.routers.config.update_config_transaction",
+            "qwenpaw.app.routers.config.mutate_config",
         ) as update_mock,
         patch(
             "qwenpaw.app.mutation_authorization.emit_mutation_audit",

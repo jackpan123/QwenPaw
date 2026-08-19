@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import json
+
 from unittest.mock import patch
 
 import pytest
@@ -119,19 +121,67 @@ def test_internal_principal_recomputes_capability_from_config():
     assert verified.can_mutate is True
 
 
-def test_internal_principal_not_forged_into_elevated_role():
+@pytest.mark.parametrize(
+    ("field", "forged_value"),
+    [("r", ["root"]), ("u", "root"), ("s", "local")],
+)
+def test_internal_principal_not_forged_into_elevated_role(
+    field,
+    forged_value,
+):
     """A member credential cannot be verified as an admin even by
-    tampering — the HMAC must cover user_id and roles."""
+    tampering — the HMAC must cover user_id, roles and source.
+
+    The payload is rewritten to claim elevation and re-attached to the
+    original signature, which is what an attacker holding a member
+    credential can actually do. (Flipping the credential's last character
+    does NOT work as a tamper test: the signature is 32 bytes in 43
+    base64 chars, so the final char carries 2 redundant bits and ~5% of
+    flips decode to the very same signature.)
+    """
     credential = internal_auth.mint_internal_principal(
         MEMBER_PRINCIPAL,
         target_agent_id="child",
         now=100,
     )
-    # Strip the signature and try to forge an admin payload with a fresh
-    # signature: impossible without the key. Just confirm tampering fails.
+    encoded, signature = credential.split(".")
+    body = json.loads(internal_auth._b64decode(encoded))
+    body[field] = forged_value
+    forged = (
+        internal_auth._b64encode(
+            json.dumps(body, sort_keys=True).encode("utf-8"),
+        )
+        + "."
+        + signature
+    )
+
     assert (
         internal_auth.verify_internal_principal(
-            credential[:-1] + ("0" if credential[-1] != "0" else "1"),
+            forged,
+            target_agent_id="child",
+            now=101,
+        )
+        is None
+    )
+
+
+def test_internal_principal_rejects_signature_tampering():
+    """A modified signature must not verify.
+
+    The first signature character is flipped: unlike the last one it has
+    no redundant bits, so the decoded signature always changes.
+    """
+    credential = internal_auth.mint_internal_principal(
+        MEMBER_PRINCIPAL,
+        target_agent_id="child",
+        now=100,
+    )
+    encoded, signature = credential.split(".")
+    flipped = ("A" if signature[0] != "A" else "B") + signature[1:]
+
+    assert (
+        internal_auth.verify_internal_principal(
+            f"{encoded}.{flipped}",
             target_agent_id="child",
             now=101,
         )

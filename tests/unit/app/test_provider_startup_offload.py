@@ -42,7 +42,6 @@ async def test_lifespan_initializes_provider_manager_in_worker_thread(
         "cleanup_startup_restore_artifacts",
         lambda: None,
     )
-    monkeypatch.setattr(app_module, "auto_register_from_env", lambda: None)
     monkeypatch.setattr(
         app_module,
         "check_proxy_config_sanity",
@@ -124,7 +123,6 @@ async def test_lifespan_initializes_local_model_manager_in_worker_thread(
         "cleanup_startup_restore_artifacts",
         lambda: None,
     )
-    monkeypatch.setattr(app_module, "auto_register_from_env", lambda: None)
     monkeypatch.setattr(
         app_module,
         "check_proxy_config_sanity",

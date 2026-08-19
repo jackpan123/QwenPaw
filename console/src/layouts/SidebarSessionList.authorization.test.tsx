@@ -38,6 +38,23 @@ const {
   mockHandleArchiveToggle: vi.fn(),
 }));
 
+// Upstream added chat groups as a data source for the session list; without
+// it `flatRows` stays empty and nothing renders.
+vi.mock("../hooks/useChatGroups", () => ({
+  useChatGroups: () => ({
+    groups: [
+      { id: "default", name: "Uncategorized", pinned: false, system: true },
+    ],
+    loading: false,
+    refreshGroups: vi.fn(),
+    createGroup: vi.fn(),
+    renameGroup: vi.fn(),
+    pinGroup: vi.fn(),
+    deleteGroup: vi.fn(),
+    reorderGroups: vi.fn(),
+  }),
+}));
+
 vi.mock(
   "../pages/Chat/components/ChatSessionDrawer/useSessionListData",
   () => ({

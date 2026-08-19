@@ -57,7 +57,12 @@ def test_transaction_write_failure_does_not_mutate_cached_config(
 
     assert cached.user_timezone == "UTC"
     assert cached.security.mutation_guard.deny_message != "changed"
-    assert config_utils.load_config(config_path) is cached
+    # Upstream hardened load_config to hand out a deep copy every
+    # time, so identity no longer holds — assert the cached content
+    # is unchanged instead.
+    assert config_utils.load_config(config_path).model_dump(
+        mode="json", by_alias=True
+    ) == cached.model_dump(mode="json", by_alias=True)
     assert (
         json.loads(config_path.read_text(encoding="utf-8"))["user_timezone"]
         == "UTC"
@@ -174,7 +179,12 @@ def test_transaction_noop_skips_write_and_preserves_cache(
     assert validated.model_dump(mode="json", by_alias=True) == (
         cached.model_dump(mode="json", by_alias=True)
     )
-    assert config_utils.load_config(config_path) is cached
+    # Upstream hardened load_config to hand out a deep copy every
+    # time, so identity no longer holds — assert the cached content
+    # is unchanged instead.
+    assert config_utils.load_config(config_path).model_dump(
+        mode="json", by_alias=True
+    ) == cached.model_dump(mode="json", by_alias=True)
 
 
 def test_root_config_cache_is_isolated_by_normalized_path(tmp_path):

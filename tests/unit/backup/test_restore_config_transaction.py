@@ -460,7 +460,12 @@ def test_direct_global_config_write_failure_keeps_original_cache_and_stage(
 
     assert config_path.read_bytes() == original_bytes
     assert staged.is_file()
-    assert config_utils.load_config(config_path) is cached
+    # Upstream hardened load_config to hand out a deep copy every
+    # time, so identity no longer holds — assert the cached content
+    # is unchanged instead.
+    assert config_utils.load_config(config_path).model_dump(
+        mode="json", by_alias=True
+    ) == cached.model_dump(mode="json", by_alias=True)
 
 
 def test_raw_config_mutation_revalidates_without_polluting_disk_or_cache(
@@ -480,7 +485,12 @@ def test_raw_config_mutation_revalidates_without_polluting_disk_or_cache(
         config_utils.update_raw_config_transaction(make_invalid, config_path)
 
     assert config_path.read_bytes() == original_bytes
-    assert config_utils.load_config(config_path) is cached
+    # Upstream hardened load_config to hand out a deep copy every
+    # time, so identity no longer holds — assert the cached content
+    # is unchanged instead.
+    assert config_utils.load_config(config_path).model_dump(
+        mode="json", by_alias=True
+    ) == cached.model_dump(mode="json", by_alias=True)
 
 
 def test_workspace_config_write_failure_does_not_pollute_shared_cache(
@@ -515,7 +525,12 @@ def test_workspace_config_write_failure_does_not_pollute_shared_cache(
     assert cached.agents.profiles["agent-a"].workspace_dir == str(
         old_workspace,
     )
-    assert config_utils.load_config(config_path) is cached
+    # Upstream hardened load_config to hand out a deep copy every
+    # time, so identity no longer holds — assert the cached content
+    # is unchanged instead.
+    assert config_utils.load_config(config_path).model_dump(
+        mode="json", by_alias=True
+    ) == cached.model_dump(mode="json", by_alias=True)
     persisted = json.loads(config_path.read_text(encoding="utf-8"))
     assert persisted["agents"]["profiles"]["agent-a"]["workspace_dir"] == str(
         old_workspace,

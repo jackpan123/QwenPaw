@@ -56,7 +56,13 @@ vi.mock("../../hooks/useAppMessage", () => ({
 vi.mock("react-i18next", async (importOriginal) => ({
   ...(await importOriginal<typeof import("react-i18next")>()),
   useTranslation: () => ({
-    t: (key: string) => key,
+    // Returns the key so assertions stay locale-independent, but keeps
+    // interpolation values — upstream's fallback-notice test asserts on the
+    // model ids passed in.
+    t: (key: string, opts?: unknown) =>
+      opts && typeof opts === "object"
+        ? `${key} ${Object.values(opts as Record<string, unknown>).join(" ")}`
+        : key,
     i18n: { language: "en" },
   }),
 }));

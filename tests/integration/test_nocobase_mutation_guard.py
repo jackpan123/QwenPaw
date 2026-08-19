@@ -197,7 +197,7 @@ def nocobase_http_client(monkeypatch, tmp_path: Path):
     )
     monkeypatch.setattr(
         config_router_mod,
-        "update_config_transaction",
+        "mutate_config",
         update_transaction,
     )
     monkeypatch.setattr(
@@ -397,7 +397,7 @@ def test_auth_disabled_local_config_mutation_still_uses_real_handler(
     monkeypatch.setattr(auth_mod, "is_auth_enabled", lambda: False)
     monkeypatch.setattr(
         config_router_mod,
-        "update_config_transaction",
+        "mutate_config",
         update_transaction,
     )
     app = FastAPI()
