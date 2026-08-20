@@ -1,19 +1,10 @@
-import {
-  Layout,
-  Menu,
-  Button,
-  Tooltip,
-  Badge,
-  Popover,
-  Tour,
-} from "antd";
+import { Layout, Menu, Button, Tooltip, Badge, Popover, Tour } from "antd";
 import type { TourProps } from "antd";
 import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { ChevronDown, MessageSquareText } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-import { useAppMessage } from "../hooks/useAppMessage";
 import AgentSelector from "../components/AgentSelector";
 import {
   SparkChatTabFill,

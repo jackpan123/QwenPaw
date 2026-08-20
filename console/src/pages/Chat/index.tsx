@@ -180,7 +180,6 @@ import {
 } from "../../utils/sessionRoute";
 import { useUploadLimitStore } from "../../stores/uploadLimitStore";
 import { useAuthorizationStore } from "../../stores/authorizationStore";
-import MessageQueuePanel from "./components/MessageQueuePanel";
 import ChatSenderTabsPanel from "./components/ChatSenderTabsPanel";
 import {
   selectTasksForSession,
@@ -2741,7 +2740,6 @@ export default function ChatPage() {
       onProgress?: (e: { percent?: number }) => void;
     }) => {
       const { file, onSuccess, onError, onProgress } = options;
-      if (!useAuthorizationStore.getState().canMutate) return;
       try {
         // Warn when model has no multimodal support
         if (usesQwenPawBackend && !multimodalCaps.supportsMultimodal) {
@@ -3261,7 +3259,7 @@ export default function ChatPage() {
             ) : null}
           </span>
         ),
-        ...(canMutate && supportsAttachments
+        ...(supportsAttachments
           ? {
               attachments: {
                 multiple: true,

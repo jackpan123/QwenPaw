@@ -579,7 +579,7 @@ describe("ChatPage", () => {
     expect(onError).not.toHaveBeenCalled();
   });
 
-  it("removes upload entry points for a read-only member", async () => {
+  it("keeps upload entry points for a read-only member", async () => {
     useAuthorizationStore.getState().set({
       authEnabled: true,
       username: "member-user",
@@ -590,12 +590,19 @@ describe("ChatPage", () => {
     renderWithProviders(<ChatPage />, { initialEntries: ["/chat"] });
     await screen.findByTestId("chat-ui");
 
-    expect(capturedOptions.sender.attachments).toBeUndefined();
-    expect(capturedOptions.sender.longTextUpload).toBeUndefined();
-    expect(mockUploadFile).not.toHaveBeenCalled();
+    expect(capturedOptions.sender.attachments).toBeDefined();
+    expect(capturedOptions.sender.longTextUpload).toBeDefined();
+
+    const onSuccess = vi.fn();
+    await capturedOptions.sender.attachments.customRequest({
+      file: new File(["content"], "img.png", { type: "image/png" }),
+      onSuccess,
+      onError: vi.fn(),
+    });
+    expect(mockUploadFile).toHaveBeenCalled();
   });
 
-  it("keeps a captured upload handler inert after runtime downgrade", async () => {
+  it("keeps a captured upload handler working after runtime downgrade", async () => {
     renderWithProviders(<ChatPage />, { initialEntries: ["/chat"] });
     await screen.findByTestId("chat-ui");
     const staleUpload = capturedOptions.sender.attachments.customRequest;
@@ -613,7 +620,7 @@ describe("ChatPage", () => {
       onProgress: vi.fn(),
     });
 
-    expect(mockUploadFile).not.toHaveBeenCalled();
+    expect(mockUploadFile).toHaveBeenCalled();
   });
 
   it("still sends plain text for a read-only member", async () => {
