@@ -149,6 +149,7 @@ e2e/data/
 .qwenpaw-dev/
 .qwenpaw-dev.secret/
 .qwenpaw-dev.backups/
+.qwenpaw-dev.plugin-backups/
 .playwright-mcp/
 e2e/.pytest_cache/
 e2e/__pycache__/

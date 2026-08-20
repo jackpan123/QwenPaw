@@ -546,6 +546,8 @@ def nocobase_console_client(monkeypatch):
         )
 
     class Channel:
+        media_dir = Path(tempfile.mkdtemp(prefix="qwenpaw-upload-test-"))
+
         @staticmethod
         def resolve_session_id(sender_id, channel_meta):
             del sender_id
@@ -597,6 +599,8 @@ def nocobase_console_client(monkeypatch):
             # Upstream added an object-identity owner alongside owner_id.
             owner=None,
         ):
+            # Signature parity with upstream; assertions use owner_id.
+            del owner
             captured["start_calls"].append(
                 (chat_id, payload, producer, owner_id, requester_id),
             )
@@ -770,6 +774,29 @@ def test_console_task_status_is_visible_only_to_owner_or_privileged_roles(
     assert other.status_code == 404
     assert admin.status_code == 200
     assert root.status_code == 200
+
+
+def test_console_upload_allows_member_chat_attachment(
+    nocobase_console_client,
+) -> None:
+    client, _captured = nocobase_console_client
+
+    assert (
+        console_router_mod.post_console_upload.__qwenpaw_api_capability__
+        is RouteCapability.CHAT
+    )
+
+    files = {"file": ("note.txt", b"hello attachment", "text/plain")}
+    member = client.post(
+        "/api/console/upload",
+        files=files,
+        headers={"Authorization": "Bearer member-token"},
+    )
+    assert member.status_code == 200
+    assert member.json()["file_name"] == "note.txt"
+
+    anonymous = client.post("/api/console/upload", files=files)
+    assert anonymous.status_code == 401
 
 
 async def test_console_task_fixture_cleanup_preserves_snapshot_tasks() -> None:

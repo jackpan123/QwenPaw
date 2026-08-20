@@ -88,7 +88,7 @@ describe("useSessionListData authorization", () => {
 
     act(() => result.current.handleEditStart("session-1", "Session One"));
     await act(() => result.current.handleEditSubmit());
-    await act(() => result.current.handlePinToggle("session-1"));
+    await act(() => result.current.handlePinToggle("session-1", true));
     await act(() => result.current.handleArchiveToggle("session-1"));
     await act(() => result.current.handleDelete("session-1"));
 
