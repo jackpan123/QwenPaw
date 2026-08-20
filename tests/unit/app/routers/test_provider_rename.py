@@ -76,3 +76,20 @@ async def test_configure_provider_ignores_blank_name():
 
     assert manager.last_config is not None
     assert "name" not in manager.last_config
+
+
+def test_set_active_model_is_chat_capability():
+    """Members may switch the active model from the chat page.
+
+    The PUT route mutates shared model config by design (product
+    decision), so it must declare CHAT — without the declaration the
+    mutation-authorization middleware fail-closes PUT to MUTATE and
+    members get 403.
+    """
+    from qwenpaw.app.routers import providers
+    from qwenpaw.security.mutation_guard import RouteCapability
+
+    assert (
+        providers.set_active_model.__qwenpaw_api_capability__
+        is RouteCapability.CHAT
+    )

@@ -30,7 +30,9 @@ from ...constant import WORKING_DIR
 from ...runtime.tool_registry import tool_descriptor
 from ...sandbox import ExecutionResult
 from ...sandbox.config import SandboxConfig
+from ...security.mutation_guard import ActionEffect
 from ...utils.io_utils import run_sync_io
+from .shell_readonly import ShellCommandEffectSpec
 
 _SHELL_OUTPUT_MAX_BYTES = 1024 * 1024
 _SHELL_OUTPUT_DRAIN_GRACE_SECS = 10.0
@@ -962,6 +964,7 @@ async def _execute_posix_host(
     tool_type="shell",
     target_param="command",
     side_effect="mutate",
+    effect_spec=ShellCommandEffectSpec(default=ActionEffect.MUTATE),
     policy_name="Bash",
     ui_description="Execute shell commands",
     ui_icon="💻",

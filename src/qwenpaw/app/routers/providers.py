@@ -22,6 +22,7 @@ from qwenpaw.exceptions import (
 )
 
 from ..agent_context import get_agent_for_request
+from ..mutation_authorization import api_capability
 from ..utils import schedule_agent_reload
 from ...config.config import (
     AgentProfileConfig,
@@ -35,6 +36,7 @@ from ...providers.provider import (
 )
 from ...config.config import ActiveModelsInfo
 from ...providers.provider_manager import ProviderManager
+from ...security.mutation_guard import RouteCapability
 from ...utils.io_utils import run_sync_io
 from ...utils.logging import sanitize_log_value
 from ...providers.openrouter_provider import OpenRouterProvider
@@ -805,6 +807,7 @@ async def get_active_models(
     response_model=ActiveModelsInfo,
     summary="Set active LLM",
 )
+@api_capability(RouteCapability.CHAT)
 async def set_active_model(
     request: Request,
     manager: ProviderManager = Depends(get_provider_manager),
