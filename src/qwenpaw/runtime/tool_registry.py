@@ -342,6 +342,9 @@ def tool_descriptor(
     read_only_values: tuple[str, ...] = (),
     mutate_values: tuple[str, ...] = (),
     external_values: tuple[str, ...] = (),
+    # Fully custom effect model; when given it wins over the string-based
+    # fields above (e.g. the shell tool's per-command classifier).
+    effect_spec: "ToolEffectSpec | None" = None,
     **metadata: Any,
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Attach a :class:`ToolDescriptor` to ``fn._tool_descriptor`` and
@@ -409,7 +412,8 @@ def tool_descriptor(
                 icon=ui_icon,
                 display_to_user=display_to_user,
             ),
-            effect=ToolEffectSpec(
+            effect=effect_spec
+            or ToolEffectSpec(
                 default=_resolve_default_effect(side_effect),
                 selector_param=side_effect_param,
                 read_values=tuple(read_only_values),
