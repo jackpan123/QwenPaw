@@ -637,6 +637,7 @@ async def post_console_chat_stop(
 
 
 @router.post("/upload", response_model=dict, summary="Upload file for chat")
+@api_capability(RouteCapability.CHAT)
 async def post_console_upload(
     request: Request,
     file: UploadFile = File(..., description="File to attach"),
