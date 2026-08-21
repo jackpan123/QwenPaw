@@ -42,6 +42,46 @@ class QwenPawLocalWorkspace(AgentScopeLocalWorkspace):
         """
         self._governor = governor
 
+    def list_potential_tool_descriptors(
+        self,
+        agent_config: Any,
+    ) -> list[Any]:
+        """Return registered descriptors that could load for this agent.
+
+        Conditional descriptor requirements are unioned so every registered
+        mode, skill, and feature gate is considered potentially loadable.
+        Config gates continue to determine which core and plugin tools are
+        eligible for the agent.
+        """
+        descriptors = [
+            descriptor
+            for name in self._tool_registry.names()
+            if (descriptor := self._tool_registry.get(name)) is not None
+        ]
+        required_modes = {
+            mode
+            for descriptor in descriptors
+            for mode in descriptor.requires_modes
+        }
+        required_skills = {
+            skill
+            for descriptor in descriptors
+            for skill in descriptor.requires_skills
+        }
+        required_features = {
+            feature
+            for descriptor in descriptors
+            for feature in descriptor.requires_features
+        }
+        allowed, denied = self._resolve_config_gates(agent_config)
+        return self._tool_registry.filter(
+            active_modes=required_modes,
+            active_skills=required_skills,
+            enabled_features=required_features,
+            allowed=allowed,
+            denied=denied,
+        )
+
     async def list_tools(  # type: ignore[override]
         self,
         *,
