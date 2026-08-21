@@ -420,29 +420,61 @@ async def test_collect_tool_permissions_keeps_other_context_contributors(
 async def test_collect_tool_permissions_offloads_synchronous_discovery(
     monkeypatch,
 ):
+    main_thread_id = threading.get_ident()
+    registry_thread_ids: list[int] = []
+    memory_thread_ids: list[int] = []
     worker_thread_ids: list[int] = []
+    agent_config = _catalog_agent_config(
+        coding_enabled=False,
+        strategy="native",
+        visual_enabled=False,
+    )
 
-    def collect_in_worker(_workspace):
+    def collect_registry(_workspace, captured_config=None):
+        registry_thread_ids.append(threading.get_ident())
+        assert captured_config is agent_config
+        return []
+
+    def collect_memory(_workspace):
+        memory_thread_ids.append(threading.get_ident())
+        return []
+
+    def collect_in_worker(snapshot):
         worker_thread_ids.append(threading.get_ident())
+        assert snapshot.config is not agent_config
+        light_context_config = snapshot.config.running.light_context_config
+        snapshot_strategy = light_context_config.strategy
+        assert snapshot_strategy == "native"
+        assert snapshot.agent_id == "catalog-agent"
+        assert snapshot.workspace_dir == "/tmp/catalog-workspace"
         return []
 
     monkeypatch.setattr(
         catalog,
-        "_collect_synchronous_candidates",
+        "_registry_candidates",
+        collect_registry,
+    )
+    monkeypatch.setattr(
+        catalog,
+        "_memory_candidates",
+        collect_memory,
+    )
+    monkeypatch.setattr(
+        catalog,
+        "_collect_blocking_candidates",
         collect_in_worker,
     )
     workspace = _workspace(
-        _catalog_agent_config(
-            coding_enabled=False,
-            strategy="native",
-            visual_enabled=False,
-        ),
+        agent_config,
     )
 
     entries = await collect_tool_permissions(workspace, _config(True))
 
     assert entries == []
-    assert worker_thread_ids != [threading.get_ident()]
+    assert registry_thread_ids == [main_thread_id]
+    assert memory_thread_ids == [main_thread_id]
+    assert len(worker_thread_ids) == 1
+    assert worker_thread_ids[0] != main_thread_id
 
 
 @pytest.mark.asyncio

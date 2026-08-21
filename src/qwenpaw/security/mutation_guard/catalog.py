@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import copy
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,6 +28,15 @@ class ToolEffectCandidate:
 
     name: str
     effect: ActionEffect
+
+
+@dataclass(frozen=True)
+class _WorkspaceSnapshot:
+    """Immutable worker-safe metadata for blocking discovery."""
+
+    agent_id: str | None
+    workspace_dir: str | Path
+    config: Any
 
 
 class ToolPermissionEntry(BaseModel):
@@ -95,10 +105,13 @@ def _candidate_from_dynamic_tool(tool: Any) -> ToolEffectCandidate:
     return ToolEffectCandidate(name, effect_spec.default)
 
 
-def _registry_candidates(workspace: Any) -> list[ToolEffectCandidate]:
+def _registry_candidates(
+    workspace: Any,
+    agent_config: Any | None = None,
+) -> list[ToolEffectCandidate]:
     """Discover descriptors selected by the local workspace registry."""
     descriptors = workspace.local_workspace.list_potential_tool_descriptors(
-        workspace.config,
+        workspace.config if agent_config is None else agent_config,
     )
     return [
         ToolEffectCandidate(descriptor.name, descriptor.effect.default)
@@ -258,13 +271,11 @@ def _optional_candidates(
         return []
 
 
-def _collect_synchronous_candidates(
-    workspace: Any,
+def _collect_blocking_candidates(
+    workspace: _WorkspaceSnapshot,
 ) -> list[ToolEffectCandidate]:
     """Collect blocking synchronous contributors in a worker thread."""
     return [
-        *_registry_candidates(workspace),
-        *_memory_candidates(workspace),
         *_optional_candidates("coding", _coding_candidates, workspace),
         *_optional_candidates(
             "scroll recall",
@@ -280,13 +291,36 @@ def _collect_synchronous_candidates(
     ]
 
 
+def _detached_agent_config(agent_config: Any) -> Any:
+    """Copy agent configuration before passing it to a worker thread."""
+    model_copy = getattr(agent_config, "model_copy", None)
+    if callable(model_copy):
+        return model_copy(deep=True)
+    return copy.deepcopy(agent_config)
+
+
 async def collect_tool_permissions(
     workspace: Any,
     config: "MutationGuardConfig",
 ) -> list[ToolPermissionEntry]:
     """Discover the workspace's tools and derive member permissions."""
+    agent_config = workspace.config
+    snapshot = _WorkspaceSnapshot(
+        agent_id=workspace.agent_id,
+        workspace_dir=workspace.workspace_dir,
+        config=_detached_agent_config(agent_config),
+    )
+    registry_candidates = _registry_candidates(workspace, agent_config)
+    memory_candidates = _memory_candidates(workspace)
+    blocking_candidates = await run_sync_io(
+        _collect_blocking_candidates,
+        snapshot,
+    )
+    driver_candidates = await _driver_candidates(workspace)
     candidates = [
-        *(await run_sync_io(_collect_synchronous_candidates, workspace)),
-        *(await _driver_candidates(workspace)),
+        *registry_candidates,
+        *memory_candidates,
+        *blocking_candidates,
+        *driver_candidates,
     ]
     return build_tool_permission_entries(candidates, config)
