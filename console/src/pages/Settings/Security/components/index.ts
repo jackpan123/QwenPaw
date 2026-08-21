@@ -7,3 +7,4 @@ export * from "./ShellEvasionSection";
 export * from "./ToolGuardTab";
 export * from "./AllowNoAuthHostsTab";
 export * from "./MutationGuardTab";
+export * from "./ToolPermissionCatalog";
