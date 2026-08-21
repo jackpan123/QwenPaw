@@ -75,10 +75,13 @@ def build_tool_permission_entries(
 
 def _candidate_from_dynamic_tool(tool: Any) -> ToolEffectCandidate:
     """Convert a dynamic tool object to a default-effect candidate."""
-    name = getattr(tool, "name", None) or getattr(tool, "__name__", None)
+    name = getattr(tool, "name", None)
     if name is None:
+        name = getattr(tool, "__name__", None)
+    name = str(name) if name is not None else ""
+    if not name:
         raise ValueError("discovered dynamic tool has no name")
     effect_spec = getattr(tool, "_qp_effect_spec", None)
     if effect_spec is None:
         effect_spec = get_tool_effect_spec(tool)
-    return ToolEffectCandidate(str(name), effect_spec.default)
+    return ToolEffectCandidate(name, effect_spec.default)

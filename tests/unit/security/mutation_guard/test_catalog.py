@@ -117,3 +117,13 @@ def test_candidate_from_dynamic_tool_rejects_nameless_object():
         match=r"^discovered dynamic tool has no name$",
     ):
         _candidate_from_dynamic_tool(object())
+
+
+def test_candidate_from_dynamic_tool_rejects_empty_name():
+    tool = SimpleNamespace(name="", __name__=0)
+
+    with pytest.raises(
+        ValueError,
+        match=r"^discovered dynamic tool has no name$",
+    ):
+        _candidate_from_dynamic_tool(tool)
