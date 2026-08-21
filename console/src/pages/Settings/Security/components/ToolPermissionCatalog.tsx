@@ -107,6 +107,7 @@ export function ToolPermissionCatalog({
           <code
             className={styles.toolPermissionName}
             data-testid="tool-permission-name"
+            translate="no"
           >
             {name}
           </code>
@@ -119,7 +120,7 @@ export function ToolPermissionCatalog({
         render: (effect: ToolPermissionEffect) => {
           const presentation = effectPresentation[effect];
           return (
-            <Tag color={presentation.color}>
+            <Tag color={presentation.color} translate="no">
               {t(`security.mutationGuard.catalog.effects.${presentation.key}`)}
             </Tag>
           );
@@ -150,7 +151,7 @@ export function ToolPermissionCatalog({
 
   return (
     <section className={styles.toolPermissionCatalog}>
-      <h3>{t("security.mutationGuard.catalog.title")}</h3>
+      <h2>{t("security.mutationGuard.catalog.title")}</h2>
       <p>{t("security.mutationGuard.catalog.description")}</p>
       {error ? (
         <div className={styles.toolPermissionState}>

@@ -7,6 +7,8 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { StrictMode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ToolPermissionInfo } from "../../../api/modules/security";
@@ -51,6 +53,11 @@ import {
   useInternalRequestGenerationGuard,
 } from "./components/ToolPermissionCatalog";
 
+const stylesSource = readFileSync(
+  join(process.cwd(), "src/pages/Settings/Security/index.module.less"),
+  "utf8",
+);
+
 const allEffects: ToolPermissionInfo[] = [
   { name: "z_read", effect: "read", allowed_for_member: false },
   { name: "a_mutate", effect: "mutate", allowed_for_member: true },
@@ -82,6 +89,62 @@ describe("ToolPermissionCatalog", () => {
     vi.clearAllMocks();
     hoisted.apiMocks.getToolPermissions.mockResolvedValue([]);
     useAgentStore.setState({ selectedAgent: "default" });
+  });
+
+  it("uses a level-two heading for the catalog title", async () => {
+    render(<ToolPermissionCatalog refreshToken={0} />);
+
+    await screen.findByText("security.mutationGuard.catalog.empty");
+    expect(
+      screen.getByRole("heading", {
+        level: 2,
+        name: "security.mutationGuard.catalog.title",
+      }),
+    ).toBeInTheDocument();
+  });
+
+  it("protects diagnostic identifiers from automatic translation", async () => {
+    hoisted.apiMocks.getToolPermissions.mockResolvedValue(allEffects);
+
+    render(<ToolPermissionCatalog refreshToken={0} />);
+
+    await screen.findByText(
+      "security.mutationGuard.catalog.effects.externalSideEffect",
+    );
+
+    for (const toolName of screen.getAllByTestId("tool-permission-name")) {
+      expect(toolName).toHaveAttribute("translate", "no");
+    }
+
+    const effectLabels = [
+      "security.mutationGuard.catalog.effects.read",
+      "security.mutationGuard.catalog.effects.mutate",
+      "security.mutationGuard.catalog.effects.externalSideEffect",
+      "security.mutationGuard.catalog.effects.chatInfrastructure",
+      "security.mutationGuard.catalog.effects.unknown",
+    ];
+    for (const label of effectLabels) {
+      expect(screen.getByText(label)).toHaveAttribute("translate", "no");
+    }
+
+    for (const permission of [
+      ...screen.getAllByText("security.mutationGuard.catalog.allowed"),
+      ...screen.getAllByText("security.mutationGuard.catalog.denied"),
+    ]) {
+      expect(permission).not.toHaveAttribute("translate");
+    }
+  });
+
+  it("allows long tool names to wrap within the catalog", () => {
+    const marker = ".toolPermissionName {";
+    const markerIndex = stylesSource.indexOf(marker);
+    const rule = stylesSource.slice(
+      markerIndex,
+      stylesSource.indexOf("}", markerIndex) + 1,
+    );
+
+    expect(markerIndex).toBeGreaterThanOrEqual(0);
+    expect(rule).toMatch(/overflow-wrap:\s*anywhere/);
   });
 
   it("renders sorted catalog entries with their server permissions", async () => {
