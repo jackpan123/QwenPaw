@@ -5,7 +5,9 @@ Subclasses AgentScope's :class:`LocalWorkspace` so that
 :meth:`list_tools` returns QwenPaw's own tools (managed by
 :class:`ToolRegistry`) instead of AgentScope's built-in six.
 
-All tool consumers call ``list_tools()`` — the only public interface:
+All runtime tool consumers call ``list_tools()``. The read-only metadata
+seam ``list_potential_tool_descriptors()`` exposes potentially loadable
+descriptors for catalog consumers:
 
 - **No arguments**: returns default-enabled tools (``WorkspaceBase``
   protocol).
@@ -22,7 +24,7 @@ from typing import TYPE_CHECKING, Any
 from agentscope.workspace import LocalWorkspace as AgentScopeLocalWorkspace
 
 if TYPE_CHECKING:
-    from ...runtime.tool_registry import ToolRegistry
+    from ...runtime.tool_registry import ToolDescriptor, ToolRegistry
 
 
 class QwenPawLocalWorkspace(AgentScopeLocalWorkspace):
@@ -45,7 +47,7 @@ class QwenPawLocalWorkspace(AgentScopeLocalWorkspace):
     def list_potential_tool_descriptors(
         self,
         agent_config: Any,
-    ) -> list[Any]:
+    ) -> list[ToolDescriptor]:
         """Return registered descriptors that could load for this agent.
 
         Conditional descriptor requirements are unioned so every registered

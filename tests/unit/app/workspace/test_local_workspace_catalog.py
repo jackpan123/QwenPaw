@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """Tests for potentially loadable local-workspace tool descriptors."""
 
+# pylint: disable=protected-access
+
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -28,6 +30,7 @@ def _config(**tools: object) -> SimpleNamespace:
 
 
 def test_potential_descriptors_include_registered_conditional_tools() -> None:
+    """Include descriptors gated by any registered mode, skill, or feature."""
     workspace = _workspace(
         _descriptor("plain"),
         _descriptor("goal", requires_modes=("goal",)),
@@ -49,6 +52,7 @@ def test_potential_descriptors_include_registered_conditional_tools() -> None:
 
 
 def test_potential_descriptors_apply_disable_and_plugin_opt_in() -> None:
+    """Honor disabled core tools and explicit plugin opt-in configuration."""
     workspace = _workspace(
         _descriptor("core_enabled"),
         _descriptor("core_disabled"),
