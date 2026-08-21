@@ -32,6 +32,30 @@ const effectPresentation: Record<
   },
 };
 
+// eslint-disable-next-line react-refresh/only-export-components
+export function useRequestGenerationGuard() {
+  const mountedRef = useRef(false);
+  const generationRef = useRef(0);
+
+  useEffect(() => {
+    mountedRef.current = true;
+
+    return () => {
+      mountedRef.current = false;
+      generationRef.current += 1;
+    };
+  }, []);
+
+  const begin = useCallback(() => ++generationRef.current, []);
+  const isCurrent = useCallback(
+    (generation: number) =>
+      mountedRef.current && generation === generationRef.current,
+    [],
+  );
+
+  return { begin, isCurrent };
+}
+
 export function ToolPermissionCatalog({
   refreshToken,
 }: ToolPermissionCatalogProps) {
@@ -40,39 +64,32 @@ export function ToolPermissionCatalog({
   const [items, setItems] = useState<ToolPermissionInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
-  const mountedRef = useRef(false);
-  const generationRef = useRef(0);
+  const { begin, isCurrent } = useRequestGenerationGuard();
 
   const load = useCallback(async () => {
-    const generation = ++generationRef.current;
+    const generation = begin();
     setLoading(true);
     setError(false);
 
     try {
       const loaded = await api.getToolPermissions();
-      if (!mountedRef.current || generation !== generationRef.current) {
+      if (!isCurrent(generation)) {
         return;
       }
       setItems(loaded);
     } catch {
-      if (mountedRef.current && generation === generationRef.current) {
+      if (isCurrent(generation)) {
         setError(true);
       }
     } finally {
-      if (mountedRef.current && generation === generationRef.current) {
+      if (isCurrent(generation)) {
         setLoading(false);
       }
     }
-  }, []);
+  }, [begin, isCurrent]);
 
   useEffect(() => {
-    mountedRef.current = true;
     void load();
-
-    return () => {
-      mountedRef.current = false;
-      generationRef.current += 1;
-    };
   }, [load, refreshToken, selectedAgent]);
 
   const columns: ColumnsType<ToolPermissionInfo> = [
@@ -122,32 +139,34 @@ export function ToolPermissionCatalog({
     left.name.localeCompare(right.name),
   );
 
-  if (error) {
-    return (
-      <div className={styles.toolPermissionState}>
-        <span role="alert">{t("security.mutationGuard.loadFailed")}</span>
-        <Button onClick={() => void load()}>{t("environments.retry")}</Button>
-      </div>
-    );
-  }
-
   return (
     <section className={styles.toolPermissionCatalog}>
       <h3>{t("security.mutationGuard.catalog.title")}</h3>
       <p>{t("security.mutationGuard.catalog.description")}</p>
-      <Table<ToolPermissionInfo>
-        columns={columns}
-        dataSource={sortedItems}
-        loading={loading}
-        locale={{ emptyText: t("security.mutationGuard.catalog.empty") }}
-        pagination={{
-          pageSize: 20,
-          showSizeChanger: false,
-          hideOnSinglePage: true,
-        }}
-        rowKey="name"
-        size="small"
-      />
+      {error ? (
+        <div className={styles.toolPermissionState}>
+          <span role="alert">
+            {t("security.mutationGuard.catalog.loadFailed")}
+          </span>
+          <Button onClick={() => void load()}>
+            {t("security.mutationGuard.catalog.retry")}
+          </Button>
+        </div>
+      ) : (
+        <Table<ToolPermissionInfo>
+          columns={columns}
+          dataSource={sortedItems}
+          loading={loading}
+          locale={{ emptyText: t("security.mutationGuard.catalog.empty") }}
+          pagination={{
+            pageSize: 20,
+            showSizeChanger: false,
+            hideOnSinglePage: true,
+          }}
+          rowKey="name"
+          size="small"
+        />
+      )}
     </section>
   );
 }

@@ -2,6 +2,7 @@ import {
   act,
   fireEvent,
   render,
+  renderHook,
   screen,
   waitFor,
 } from "@testing-library/react";
@@ -25,7 +26,10 @@ vi.mock("react-i18next", () => ({
   }),
 }));
 
-import { ToolPermissionCatalog } from "./components/ToolPermissionCatalog";
+import {
+  ToolPermissionCatalog,
+  useRequestGenerationGuard,
+} from "./components/ToolPermissionCatalog";
 
 const allEffects: ToolPermissionInfo[] = [
   { name: "z_read", effect: "read", allowed_for_member: true },
@@ -134,7 +138,7 @@ describe("ToolPermissionCatalog", () => {
     ).toBeInTheDocument();
   });
 
-  it("retries a failed catalog request", async () => {
+  it("preserves catalog context and retries a failed catalog request", async () => {
     hoisted.apiMocks.getToolPermissions.mockRejectedValueOnce(
       new Error("network down"),
     );
@@ -143,9 +147,19 @@ describe("ToolPermissionCatalog", () => {
     render(<ToolPermissionCatalog refreshToken={0} />);
 
     expect(await screen.findByRole("alert")).toHaveTextContent(
-      "security.mutationGuard.loadFailed",
+      "security.mutationGuard.catalog.loadFailed",
     );
-    fireEvent.click(screen.getByRole("button", { name: "environments.retry" }));
+    expect(
+      screen.getByText("security.mutationGuard.catalog.title"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("security.mutationGuard.catalog.description"),
+    ).toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "security.mutationGuard.catalog.retry",
+      }),
+    );
 
     await screen.findByText("z_read");
     expect(hoisted.apiMocks.getToolPermissions).toHaveBeenCalledTimes(2);
@@ -217,5 +231,20 @@ describe("ToolPermissionCatalog", () => {
     expect(
       screen.queryByTestId("tool-permission-name"),
     ).not.toBeInTheDocument();
+  });
+
+  it("invalidates earlier and unmounted request generations", () => {
+    const { result, unmount } = renderHook(() => useRequestGenerationGuard());
+    const firstGeneration = result.current.begin();
+
+    expect(result.current.isCurrent(firstGeneration)).toBe(true);
+
+    const secondGeneration = result.current.begin();
+    expect(result.current.isCurrent(firstGeneration)).toBe(false);
+    expect(result.current.isCurrent(secondGeneration)).toBe(true);
+
+    unmount();
+
+    expect(result.current.isCurrent(secondGeneration)).toBe(false);
   });
 });
