@@ -7,6 +7,7 @@ vi.mock("../request", () => ({
 import { securityApi } from "./security";
 import type {
   MutationGuardConfig,
+  ToolPermissionInfo,
   ToolGuardConfig,
   SkillScannerConfig,
 } from "./security";
@@ -70,6 +71,24 @@ describe("securityApi", () => {
 
     expect(request).toHaveBeenCalledWith("/config/security/mutation-guard");
     expect(result).toEqual(config);
+  });
+
+  it("getToolPermissions calls the tool permission catalog endpoint", async () => {
+    const catalog: ToolPermissionInfo[] = [
+      {
+        name: "memory_search",
+        effect: "unknown",
+        allowed_for_member: false,
+      },
+    ];
+    vi.mocked(request).mockResolvedValue(catalog);
+
+    const result = await securityApi.getToolPermissions();
+
+    expect(request).toHaveBeenCalledWith(
+      "/config/security/mutation-guard/tool-permissions",
+    );
+    expect(result).toEqual(catalog);
   });
 
   it("updateMutationGuard sends PUT without updating Tool Guard", async () => {
