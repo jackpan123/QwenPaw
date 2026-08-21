@@ -4,13 +4,18 @@
 from __future__ import annotations
 
 import json
+import threading
 from types import SimpleNamespace
 
 import pytest
 
 from qwenpaw.config.config import MutationGuardConfig
-from qwenpaw.runtime.tool_registry import ToolEffectSpec
-from qwenpaw.security.mutation_guard import ActionEffect
+from qwenpaw.drivers.capabilities import (
+    CapabilityExposure,
+    DriverCapability,
+)
+from qwenpaw.runtime.tool_registry import ToolDescriptor, ToolEffectSpec
+from qwenpaw.security.mutation_guard import ActionEffect, catalog
 from qwenpaw.security.mutation_guard.catalog import (
     ToolEffectCandidate,
     ToolPermissionEntry,
@@ -188,13 +193,14 @@ def _workspace(
     descriptors=(),
     memory_manager=None,
     driver_manager=None,
+    workspace_dir="/tmp/catalog-workspace",
 ):
     return SimpleNamespace(
         config=config,
         local_workspace=_FakeLocalWorkspace(descriptors),
         memory_manager=memory_manager,
         driver_manager=driver_manager,
-        workspace_dir="/tmp/catalog-workspace",
+        workspace_dir=workspace_dir,
         agent_id="catalog-agent",
     )
 
@@ -227,6 +233,7 @@ def _catalog_agent_config(
 @pytest.mark.asyncio
 async def test_collect_tool_permissions_discovers_available_sources(
     monkeypatch,
+    tmp_path,
 ):
     config = _catalog_agent_config()
     coding_calls: list[dict[str, object]] = []
@@ -248,33 +255,46 @@ async def test_collect_tool_permissions_discovers_available_sources(
         "qwenpaw.security.mutation_guard.catalog._scroll_repl_available",
         lambda scroll_config: True,
     )
+    driver_original_id = "driver://fake/driver/tools/driver-original#read"
     driver_manager = _FakeDriverManager(
         [
-            SimpleNamespace(
+            DriverCapability(
+                capability_id=driver_original_id,
+                driver_name="fake",
+                protocol="fake",
+                kind="tool",
+                action="read",
                 name="driver-original",
                 effect=ActionEffect.READ,
-                exposure=SimpleNamespace(
+                exposure=CapabilityExposure(
                     as_tool=True,
                     tool_name="driver_read",
                 ),
             ),
-            SimpleNamespace(
+            DriverCapability(
+                capability_id="driver://fake/driver/tools/driver_hidden#write",
+                driver_name="fake",
+                protocol="fake",
+                kind="tool",
+                action="write",
                 name="driver_hidden",
                 effect=ActionEffect.MUTATE,
-                exposure=SimpleNamespace(as_tool=False, tool_name=""),
+                exposure=CapabilityExposure(as_tool=False),
             ),
         ],
     )
     workspace = _workspace(
         config,
         descriptors=[
-            SimpleNamespace(
+            ToolDescriptor(
                 name="mode_registered",
+                func=lambda: None,
                 effect=ToolEffectSpec(ActionEffect.MUTATE),
             ),
         ],
         memory_manager=_FakeMemoryManager(),
         driver_manager=driver_manager,
+        workspace_dir=tmp_path,
     )
 
     entries = await collect_tool_permissions(workspace, _config(True))
@@ -299,7 +319,7 @@ async def test_collect_tool_permissions_discovers_available_sources(
     assert coding_calls == [
         {
             "agent_config": config,
-            "workspace_dir": "/tmp/catalog-workspace",
+            "workspace_dir": tmp_path,
             "agent_id": "catalog-agent",
             "request_context": {},
             "governor": None,
@@ -311,7 +331,7 @@ async def test_collect_tool_permissions_discovers_available_sources(
 async def test_collect_tool_permissions_skips_disabled_coding_and_context(
     monkeypatch,
 ):
-    def coding_must_not_run(*args, **kwargs):
+    def coding_must_not_run(*_args, **_kwargs):
         pytest.fail(
             "coding collector was called while coding mode is disabled",
         )
@@ -371,6 +391,58 @@ async def test_collect_tool_permissions_omits_scroll_repl_when_unavailable(
     entries = await collect_tool_permissions(workspace, _config(True))
 
     assert [entry.name for entry in entries] == ["recall_history"]
+
+
+@pytest.mark.asyncio
+async def test_collect_tool_permissions_keeps_other_context_contributors(
+    monkeypatch,
+):
+    def unavailable_repl(workspace):
+        raise RuntimeError("repl unavailable")
+
+    monkeypatch.setattr(
+        "qwenpaw.security.mutation_guard.catalog._scroll_repl_candidates",
+        unavailable_repl,
+    )
+    workspace = _workspace(
+        _catalog_agent_config(coding_enabled=False),
+    )
+
+    entries = await collect_tool_permissions(workspace, _config(True))
+
+    names = {entry.name for entry in entries}
+    assert "recall_history" in names
+    assert "recover_visual_context" in names
+    assert "recall_history_python" not in names
+
+
+@pytest.mark.asyncio
+async def test_collect_tool_permissions_offloads_synchronous_discovery(
+    monkeypatch,
+):
+    worker_thread_ids: list[int] = []
+
+    def collect_in_worker(_workspace):
+        worker_thread_ids.append(threading.get_ident())
+        return []
+
+    monkeypatch.setattr(
+        catalog,
+        "_collect_synchronous_candidates",
+        collect_in_worker,
+    )
+    workspace = _workspace(
+        _catalog_agent_config(
+            coding_enabled=False,
+            strategy="native",
+            visual_enabled=False,
+        ),
+    )
+
+    entries = await collect_tool_permissions(workspace, _config(True))
+
+    assert entries == []
+    assert worker_thread_ids != [threading.get_ident()]
 
 
 @pytest.mark.asyncio

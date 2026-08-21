@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, Iterable
 from pydantic import BaseModel, Field
 
 from ...runtime.tool_registry import get_tool_effect_spec
+from ...utils.io_utils import run_sync_io
 from .policy import ActionEffect, RequestPrincipal, authorize_effect
 
 if TYPE_CHECKING:
@@ -150,46 +151,59 @@ def _scroll_repl_available(scroll_config: Any) -> bool:
     )
 
 
-def _context_candidates(workspace: Any) -> list[ToolEffectCandidate]:
-    """Discover configured light-context tools without invoking them."""
+def _scroll_recall_candidates(
+    workspace: Any,
+) -> list[ToolEffectCandidate]:
+    """Discover the structured scroll recall tool when configured."""
     light_context_config = workspace.config.running.light_context_config
-    candidates: list[ToolEffectCandidate] = []
-    if getattr(light_context_config, "strategy", "native") == "scroll":
-        from ...agents.context.scroll.recall_tool import (
-            RecallLoopGuard,
-            make_recall_history,
-        )
+    if getattr(light_context_config, "strategy", "native") != "scroll":
+        return []
+    from ...agents.context.scroll.recall_tool import (
+        RecallLoopGuard,
+        make_recall_history,
+    )
 
-        scroll_config = light_context_config.scroll_config
-        pruning_config = light_context_config.tool_result_pruning_config
-        workspace_path = Path(workspace.workspace_dir)
-        history_path = workspace_path / scroll_config.db_filename
-        recall_history = make_recall_history(
-            history_db_path=str(history_path),
-            session_id=None,
-            agent_id=workspace.agent_id,
-            loop_guard=RecallLoopGuard(),
-            page_max_bytes=pruning_config.pruning_recent_msg_max_bytes,
-        )
-        candidates.append(_candidate_from_dynamic_tool(recall_history))
-        if _scroll_repl_available(scroll_config):
-            from ...agents.context import scroll_unsandboxed_allowed
-            from ...agents.context.scroll.repl import (
-                make_recall_history_python,
-            )
+    scroll_config = light_context_config.scroll_config
+    pruning_config = light_context_config.tool_result_pruning_config
+    history_path = Path(workspace.workspace_dir) / scroll_config.db_filename
+    recall_history = make_recall_history(
+        history_db_path=str(history_path),
+        session_id=None,
+        agent_id=workspace.agent_id,
+        loop_guard=RecallLoopGuard(),
+        page_max_bytes=pruning_config.pruning_recent_msg_max_bytes,
+    )
+    return [_candidate_from_dynamic_tool(recall_history)]
 
-            recall_history_python = make_recall_history_python(
-                history_db_path=str(history_path),
-                session_id=None,
-                agent_id=workspace.agent_id,
-                scratch_root=str(workspace_path / ".scroll"),
-                timeout_s=scroll_config.repl_timeout_s,
-                allow_unsandboxed=scroll_unsandboxed_allowed(scroll_config),
-            )
-            candidates.append(
-                _candidate_from_dynamic_tool(recall_history_python),
-            )
 
+def _scroll_repl_candidates(workspace: Any) -> list[ToolEffectCandidate]:
+    """Discover the scroll recall REPL only when it is available."""
+    light_context_config = workspace.config.running.light_context_config
+    if getattr(light_context_config, "strategy", "native") != "scroll":
+        return []
+
+    scroll_config = light_context_config.scroll_config
+    if not _scroll_repl_available(scroll_config):
+        return []
+    from ...agents.context import scroll_unsandboxed_allowed
+    from ...agents.context.scroll.repl import make_recall_history_python
+
+    workspace_path = Path(workspace.workspace_dir)
+    history_path = workspace_path / scroll_config.db_filename
+    recall_history_python = make_recall_history_python(
+        history_db_path=str(history_path),
+        session_id=None,
+        agent_id=workspace.agent_id,
+        scratch_root=str(workspace_path / ".scroll"),
+        timeout_s=scroll_config.repl_timeout_s,
+        allow_unsandboxed=scroll_unsandboxed_allowed(scroll_config),
+    )
+    return [_candidate_from_dynamic_tool(recall_history_python)]
+
+
+def _visual_candidates(workspace: Any) -> list[ToolEffectCandidate]:
+    """Discover the visual-context recovery tool when configured."""
+    light_context_config = workspace.config.running.light_context_config
     visual_compact_config = getattr(
         light_context_config,
         "visual_compact_config",
@@ -204,8 +218,8 @@ def _context_candidates(workspace: Any) -> list[ToolEffectCandidate]:
         recover_visual_context = make_recover_visual_context_tool(
             TurnRecoveryStore(),
         )
-        candidates.append(_candidate_from_dynamic_tool(recover_visual_context))
-    return candidates
+        return [_candidate_from_dynamic_tool(recover_visual_context)]
+    return []
 
 
 async def _driver_candidates(workspace: Any) -> list[ToolEffectCandidate]:
@@ -244,16 +258,35 @@ def _optional_candidates(
         return []
 
 
+def _collect_synchronous_candidates(
+    workspace: Any,
+) -> list[ToolEffectCandidate]:
+    """Collect blocking synchronous contributors in a worker thread."""
+    return [
+        *_registry_candidates(workspace),
+        *_memory_candidates(workspace),
+        *_optional_candidates("coding", _coding_candidates, workspace),
+        *_optional_candidates(
+            "scroll recall",
+            _scroll_recall_candidates,
+            workspace,
+        ),
+        *_optional_candidates(
+            "scroll repl",
+            _scroll_repl_candidates,
+            workspace,
+        ),
+        *_optional_candidates("visual", _visual_candidates, workspace),
+    ]
+
+
 async def collect_tool_permissions(
     workspace: Any,
     config: "MutationGuardConfig",
 ) -> list[ToolPermissionEntry]:
     """Discover the workspace's tools and derive member permissions."""
     candidates = [
-        *_registry_candidates(workspace),
-        *_memory_candidates(workspace),
-        *_optional_candidates("coding", _coding_candidates, workspace),
-        *_optional_candidates("context", _context_candidates, workspace),
+        *(await run_sync_io(_collect_synchronous_candidates, workspace)),
         *(await _driver_candidates(workspace)),
     ]
     return build_tool_permission_entries(candidates, config)
