@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -12,6 +13,7 @@ from qwenpaw.runtime.tool_registry import ToolEffectSpec
 from qwenpaw.security.mutation_guard import ActionEffect
 from qwenpaw.security.mutation_guard.catalog import (
     ToolEffectCandidate,
+    ToolPermissionEntry,
     _candidate_from_dynamic_tool,
     build_tool_permission_entries,
 )
@@ -62,6 +64,7 @@ def test_build_entries_allows_every_effect_when_guard_is_disabled():
 
     entries = build_tool_permission_entries(candidates, _config(False))
 
+    assert len(entries) == len(ActionEffect)
     assert all(entry.allowed_for_member for entry in entries)
 
 
@@ -102,13 +105,27 @@ def test_candidate_from_dynamic_tool_reads_wrapper_metadata():
     assert candidate == ToolEffectCandidate("wrapped", ActionEffect.READ)
 
 
-def test_candidate_from_dynamic_tool_defaults_unannotated_callable_to_unknown():
+def test_candidate_from_dynamic_tool_defaults_unannotated_callable():
     def named_tool():
         return None
 
     candidate = _candidate_from_dynamic_tool(named_tool)
 
     assert candidate == ToolEffectCandidate("named_tool", ActionEffect.UNKNOWN)
+
+
+def test_tool_permission_entry_serializes_effect_and_fields():
+    entry = ToolPermissionEntry(
+        name="read_file",
+        effect=ActionEffect.READ,
+        allowed_for_member=True,
+    )
+
+    assert json.loads(entry.model_dump_json()) == {
+        "name": "read_file",
+        "effect": "read",
+        "allowed_for_member": True,
+    }
 
 
 def test_candidate_from_dynamic_tool_rejects_nameless_object():
