@@ -98,6 +98,25 @@ Manage this in the Console under **Settings → Security → Mutation Guard**. Y
 | `classifier_timeout_seconds` | `8`                                                                      | Intent-classifier timeout in seconds; must be an integer from `1` to `60`.                                                             |
 | `deny_message`               | `当前账号没有执行变更操作的权限。你仍然可以询问相关操作方法或获取示例。` | User-facing text for chat and tool denials. HTTP 403 `detail` uses its first line/first Chinese sentence.                              |
 
+### Tool permission catalog
+
+The Mutation Guard settings page includes a read-only tool permission catalog
+for the currently selected agent. It lists tools that the agent can
+potentially load, including enabled plugin, memory, mode, context, coding, and
+Driver tools. Each row shows the tool's default effect classification and
+whether a guarded normal account is currently allowed to call that effect.
+
+The result follows the saved Mutation Guard configuration, not unsaved form
+edits. When Mutation Guard is disabled, every listed effect is allowed. When
+it is enabled, `READ` and `CHAT_INFRASTRUCTURE` are allowed for normal accounts;
+`MUTATE`, `EXTERNAL_SIDE_EFFECT`, and `UNKNOWN` are denied. `UNKNOWN` indicates
+missing effect metadata and is intentionally fail-closed.
+
+This table is diagnostic only. It cannot enable tools, edit classifications,
+or change permissions. Switching the selected agent reloads that agent's
+catalog, and successfully saving Mutation Guard settings refreshes the
+effective allow/deny column.
+
 ### Denial responses
 
 When a non-privileged member calls a mutating HTTP endpoint directly, QwenPaw responds before the handler runs. The `code` is stable and machine-readable; `detail` comes from the configured `deny_message`. With the default configuration:
