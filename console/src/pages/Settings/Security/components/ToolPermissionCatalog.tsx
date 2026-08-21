@@ -1,6 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { Button, Tag } from "@agentscope-ai/design";
-import { Table } from "antd";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Button, Table, Tag } from "@agentscope-ai/design";
 import type { ColumnsType } from "antd/es/table";
 import { useTranslation } from "react-i18next";
 import api from "../../../../api";
@@ -32,8 +31,9 @@ const effectPresentation: Record<
   },
 };
 
+/** Internal request guard exported only for focused lifecycle testing. */
 // eslint-disable-next-line react-refresh/only-export-components
-export function useRequestGenerationGuard() {
+export function useInternalRequestGenerationGuard() {
   const mountedRef = useRef(false);
   const generationRef = useRef(0);
 
@@ -64,7 +64,8 @@ export function ToolPermissionCatalog({
   const [items, setItems] = useState<ToolPermissionInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
-  const { begin, isCurrent } = useRequestGenerationGuard();
+  const [currentPage, setCurrentPage] = useState(1);
+  const { begin, isCurrent } = useInternalRequestGenerationGuard();
 
   const load = useCallback(async () => {
     const generation = begin();
@@ -92,51 +93,59 @@ export function ToolPermissionCatalog({
     void load();
   }, [load, refreshToken, selectedAgent]);
 
-  const columns: ColumnsType<ToolPermissionInfo> = [
-    {
-      title: t("security.mutationGuard.catalog.toolName"),
-      dataIndex: "name",
-      key: "name",
-      render: (name: string) => (
-        <code
-          className={styles.toolPermissionName}
-          data-testid="tool-permission-name"
-        >
-          {name}
-        </code>
-      ),
-    },
-    {
-      title: t("security.mutationGuard.catalog.classification"),
-      dataIndex: "effect",
-      key: "effect",
-      render: (effect: ToolPermissionEffect) => {
-        const presentation = effectPresentation[effect];
-        return (
-          <Tag color={presentation.color}>
-            {t(`security.mutationGuard.catalog.effects.${presentation.key}`)}
-          </Tag>
-        );
-      },
-    },
-    {
-      title: t("security.mutationGuard.catalog.normalAccount"),
-      dataIndex: "allowed_for_member",
-      key: "allowed_for_member",
-      render: (allowedForMember: boolean) => (
-        <Tag color={allowedForMember ? "green" : "red"}>
-          {t(
-            allowedForMember
-              ? "security.mutationGuard.catalog.allowed"
-              : "security.mutationGuard.catalog.denied",
-          )}
-        </Tag>
-      ),
-    },
-  ];
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [refreshToken, selectedAgent]);
 
-  const sortedItems = [...items].sort((left, right) =>
-    left.name.localeCompare(right.name),
+  const columns = useMemo<ColumnsType<ToolPermissionInfo>>(
+    () => [
+      {
+        title: t("security.mutationGuard.catalog.toolName"),
+        dataIndex: "name",
+        key: "name",
+        render: (name: string) => (
+          <code
+            className={styles.toolPermissionName}
+            data-testid="tool-permission-name"
+          >
+            {name}
+          </code>
+        ),
+      },
+      {
+        title: t("security.mutationGuard.catalog.classification"),
+        dataIndex: "effect",
+        key: "effect",
+        render: (effect: ToolPermissionEffect) => {
+          const presentation = effectPresentation[effect];
+          return (
+            <Tag color={presentation.color}>
+              {t(`security.mutationGuard.catalog.effects.${presentation.key}`)}
+            </Tag>
+          );
+        },
+      },
+      {
+        title: t("security.mutationGuard.catalog.normalAccount"),
+        dataIndex: "allowed_for_member",
+        key: "allowed_for_member",
+        render: (allowedForMember: boolean) => (
+          <Tag color={allowedForMember ? "green" : "red"}>
+            {t(
+              allowedForMember
+                ? "security.mutationGuard.catalog.allowed"
+                : "security.mutationGuard.catalog.denied",
+            )}
+          </Tag>
+        ),
+      },
+    ],
+    [t],
+  );
+
+  const sortedItems = useMemo(
+    () => [...items].sort((left, right) => left.name.localeCompare(right.name)),
+    [items],
   );
 
   return (
@@ -159,9 +168,11 @@ export function ToolPermissionCatalog({
           loading={loading}
           locale={{ emptyText: t("security.mutationGuard.catalog.empty") }}
           pagination={{
+            current: currentPage,
             pageSize: 20,
             showSizeChanger: false,
             hideOnSinglePage: true,
+            onChange: (page) => setCurrentPage(page),
           }}
           rowKey="name"
           size="small"

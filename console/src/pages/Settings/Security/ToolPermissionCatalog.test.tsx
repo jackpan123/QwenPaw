@@ -5,7 +5,9 @@ import {
   renderHook,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
+import { StrictMode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ToolPermissionInfo } from "../../../api/modules/security";
 import { useAgentStore } from "../../../stores/agentStore";
@@ -20,6 +22,24 @@ vi.mock("../../../api", () => ({
   default: hoisted.apiMocks,
 }));
 
+vi.mock("@agentscope-ai/design", async () => {
+  const React = await import("react");
+  const { Table } = await import("antd");
+  const passThrough = ({ children, ...props }: Record<string, unknown>) =>
+    React.createElement("div", props, children as React.ReactNode);
+  const button = ({ children, onClick, ...props }: Record<string, unknown>) =>
+    React.createElement(
+      "button",
+      {
+        onClick: onClick as React.MouseEventHandler<HTMLButtonElement>,
+        ...props,
+      },
+      children as React.ReactNode,
+    );
+
+  return { Button: button, Table, Tag: passThrough };
+});
+
 vi.mock("react-i18next", () => ({
   useTranslation: () => ({
     t: (key: string) => key,
@@ -28,12 +48,12 @@ vi.mock("react-i18next", () => ({
 
 import {
   ToolPermissionCatalog,
-  useRequestGenerationGuard,
+  useInternalRequestGenerationGuard,
 } from "./components/ToolPermissionCatalog";
 
 const allEffects: ToolPermissionInfo[] = [
-  { name: "z_read", effect: "read", allowed_for_member: true },
-  { name: "a_mutate", effect: "mutate", allowed_for_member: false },
+  { name: "z_read", effect: "read", allowed_for_member: false },
+  { name: "a_mutate", effect: "mutate", allowed_for_member: true },
   {
     name: "external",
     effect: "external_side_effect",
@@ -87,6 +107,26 @@ describe("ToolPermissionCatalog", () => {
         .getAllByTestId("tool-permission-name")
         .map((item) => item.textContent),
     ).toEqual(["a_mutate", "chat", "external", "unknown", "z_read"]);
+    const readRow = screen
+      .getAllByTestId("tool-permission-name")
+      .find((item) => item.textContent === "z_read")
+      ?.closest("tr");
+    const mutateRow = screen
+      .getAllByTestId("tool-permission-name")
+      .find((item) => item.textContent === "a_mutate")
+      ?.closest("tr");
+    expect(readRow).not.toBeNull();
+    expect(mutateRow).not.toBeNull();
+    expect(
+      within(readRow as HTMLTableRowElement).getByText(
+        "security.mutationGuard.catalog.denied",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      within(mutateRow as HTMLTableRowElement).getByText(
+        "security.mutationGuard.catalog.allowed",
+      ),
+    ).toBeInTheDocument();
     expect(
       screen.getByText("security.mutationGuard.catalog.effects.read"),
     ).toBeInTheDocument();
@@ -195,6 +235,42 @@ describe("ToolPermissionCatalog", () => {
     expect(hoisted.apiMocks.getToolPermissions).toHaveBeenCalledTimes(2);
   });
 
+  it("resets to the first page after changing agents", async () => {
+    const firstCatalog = Array.from({ length: 21 }, (_, index) => ({
+      name: `tool_${String(index + 1).padStart(2, "0")}`,
+      effect: "read" as const,
+      allowed_for_member: true,
+    }));
+    const secondCatalog = deferred<ToolPermissionInfo[]>();
+    hoisted.apiMocks.getToolPermissions
+      .mockResolvedValueOnce(firstCatalog)
+      .mockReturnValueOnce(secondCatalog.promise);
+
+    render(<ToolPermissionCatalog refreshToken={0} />);
+
+    await screen.findByText("tool_01");
+    fireEvent.click(screen.getByTitle("2"));
+    await screen.findByText("tool_21");
+
+    act(() => {
+      useAgentStore.setState({ selectedAgent: "agent-b" });
+    });
+
+    await waitFor(() => {
+      expect(hoisted.apiMocks.getToolPermissions).toHaveBeenCalledTimes(2);
+    });
+    expect(await screen.findByText("tool_01")).toBeInTheDocument();
+
+    secondCatalog.resolve([
+      {
+        name: "agent_b_tool",
+        effect: "read",
+        allowed_for_member: false,
+      },
+    ]);
+    expect(await screen.findByText("agent_b_tool")).toBeInTheDocument();
+  });
+
   it("does not let a stale agent request overwrite the current catalog", async () => {
     const first = deferred<ToolPermissionInfo[]>();
     const second = deferred<ToolPermissionInfo[]>();
@@ -218,23 +294,10 @@ describe("ToolPermissionCatalog", () => {
     expect(screen.getByText("a_mutate")).toBeInTheDocument();
   });
 
-  it("ignores an in-flight request after unmount", async () => {
-    const pending = deferred<ToolPermissionInfo[]>();
-    hoisted.apiMocks.getToolPermissions.mockReturnValueOnce(pending.promise);
-
-    const view = render(<ToolPermissionCatalog refreshToken={0} />);
-    view.unmount();
-    pending.resolve(allEffects);
-    await pending.promise;
-    await Promise.resolve();
-
-    expect(
-      screen.queryByTestId("tool-permission-name"),
-    ).not.toBeInTheDocument();
-  });
-
   it("invalidates earlier and unmounted request generations", () => {
-    const { result, unmount } = renderHook(() => useRequestGenerationGuard());
+    const { result, unmount } = renderHook(() =>
+      useInternalRequestGenerationGuard(),
+    );
     const firstGeneration = result.current.begin();
 
     expect(result.current.isCurrent(firstGeneration)).toBe(true);
@@ -246,5 +309,32 @@ describe("ToolPermissionCatalog", () => {
     unmount();
 
     expect(result.current.isCurrent(secondGeneration)).toBe(false);
+  });
+
+  it("keeps the latest StrictMode request response", async () => {
+    const first = deferred<ToolPermissionInfo[]>();
+    const second = deferred<ToolPermissionInfo[]>();
+    hoisted.apiMocks.getToolPermissions
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise);
+
+    render(
+      <StrictMode>
+        <ToolPermissionCatalog refreshToken={0} />
+      </StrictMode>,
+    );
+
+    await waitFor(() => {
+      expect(hoisted.apiMocks.getToolPermissions).toHaveBeenCalledTimes(2);
+    });
+    second.resolve([allEffects[1]]);
+    expect(await screen.findByText("a_mutate")).toBeInTheDocument();
+    first.resolve([allEffects[0]]);
+    await first.promise;
+
+    await waitFor(() => {
+      expect(screen.queryByText("z_read")).not.toBeInTheDocument();
+    });
+    expect(screen.getByText("a_mutate")).toBeInTheDocument();
   });
 });
