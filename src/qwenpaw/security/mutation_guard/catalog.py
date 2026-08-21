@@ -65,6 +65,8 @@ def build_tool_permission_entries(
     """Build sorted permission entries from discovered tool candidates."""
     effects_by_name: dict[str, ActionEffect] = {}
     for candidate in candidates:
+        if not candidate.name.strip():
+            raise ValueError("tool name must be non-empty")
         effect = effects_by_name.get(candidate.name)
         if effect is None:
             effects_by_name[candidate.name] = candidate.effect

@@ -30,6 +30,14 @@ def _config(enabled: bool) -> MutationGuardConfig:
     return MutationGuardConfig(enabled=enabled, privileged_roles=["admin"])
 
 
+@pytest.mark.parametrize("name", ["", "   "])
+def test_build_entries_rejects_blank_tool_names(name):
+    candidates = [ToolEffectCandidate(name, ActionEffect.READ)]
+
+    with pytest.raises(ValueError, match=r"tool name must be non-empty"):
+        build_tool_permission_entries(candidates, _config(True))
+
+
 def test_build_entries_sorts_and_uses_authoritative_enabled_policy():
     candidates = [
         ToolEffectCandidate("write", ActionEffect.MUTATE),
