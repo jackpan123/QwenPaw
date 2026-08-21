@@ -30,6 +30,19 @@ export interface MutationGuardConfig {
   deny_message: string;
 }
 
+export type ToolPermissionEffect =
+  | "read"
+  | "mutate"
+  | "external_side_effect"
+  | "unknown"
+  | "chat_infrastructure";
+
+export interface ToolPermissionInfo {
+  name: string;
+  effect: ToolPermissionEffect;
+  allowed_for_member: boolean;
+}
+
 // ── Sandbox switch types ──────────────────────────────
 
 export interface SandboxSetting {
@@ -111,6 +124,11 @@ export interface AllowNoAuthHostsUpdateBody {
 export const securityApi = {
   getMutationGuard: () =>
     request<MutationGuardConfig>("/config/security/mutation-guard"),
+
+  getToolPermissions: () =>
+    request<ToolPermissionInfo[]>(
+      "/config/security/mutation-guard/tool-permissions",
+    ),
 
   updateMutationGuard: (body: MutationGuardConfig) =>
     request<MutationGuardConfig>("/config/security/mutation-guard", {

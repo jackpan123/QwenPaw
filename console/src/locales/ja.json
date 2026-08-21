@@ -2625,7 +2625,26 @@
       "denyMessage": "権限拒否メッセージ",
       "loadFailed": "変更ガード設定の読み込みに失敗しました",
       "saveSuccess": "変更ガード設定を保存しました",
-      "saveFailed": "変更ガード設定の保存に失敗しました"
+      "saveFailed": "変更ガード設定の保存に失敗しました",
+      "catalog": {
+        "title": "ツール権限分類",
+        "description": "選択中のエージェントが読み込む可能性のあるツールと、保存済みの変更ガード設定に基づく一般アカウントの実効権限を読み取り専用で表示します。",
+        "toolName": "ツール名",
+        "classification": "分類",
+        "normalAccount": "一般アカウント",
+        "allowed": "許可",
+        "denied": "拒否",
+        "empty": "読み込み可能なツールがありません",
+        "loadFailed": "ツール権限分類を読み込めませんでした",
+        "retry": "再試行",
+        "effects": {
+          "read": "READ",
+          "mutate": "MUTATE",
+          "externalSideEffect": "EXTERNAL_SIDE_EFFECT",
+          "chatInfrastructure": "CHAT_INFRASTRUCTURE",
+          "unknown": "UNKNOWN"
+        }
+      }
     },
     "rules": {
       "title": "検出ルール",

@@ -5,12 +5,15 @@ Subclasses AgentScope's :class:`LocalWorkspace` so that
 :meth:`list_tools` returns QwenPaw's own tools (managed by
 :class:`ToolRegistry`) instead of AgentScope's built-in six.
 
-All tool consumers call ``list_tools()`` — the only public interface:
+All runtime tool consumers call ``list_tools()``:
 
 - **No arguments**: returns default-enabled tools (``WorkspaceBase``
   protocol).
 - **With filter kwargs**: returns tools filtered by per-request
   context (modes, skills, features, agent config gates).
+
+The read-only metadata seam ``list_potential_tool_descriptors(agent_config)``
+exposes potentially loadable descriptors for catalog consumers.
 
 ``ToolRegistry`` is an internal implementation detail.
 """
@@ -22,7 +25,7 @@ from typing import TYPE_CHECKING, Any
 from agentscope.workspace import LocalWorkspace as AgentScopeLocalWorkspace
 
 if TYPE_CHECKING:
-    from ...runtime.tool_registry import ToolRegistry
+    from ...runtime.tool_registry import ToolDescriptor, ToolRegistry
 
 
 class QwenPawLocalWorkspace(AgentScopeLocalWorkspace):
@@ -41,6 +44,46 @@ class QwenPawLocalWorkspace(AgentScopeLocalWorkspace):
         for the governor to take effect on workspace tools.
         """
         self._governor = governor
+
+    def list_potential_tool_descriptors(
+        self,
+        agent_config: Any,
+    ) -> list[ToolDescriptor]:
+        """Return registered descriptors that could load for this agent.
+
+        Conditional descriptor requirements are unioned so every registered
+        mode, skill, and feature gate is considered potentially loadable.
+        Config gates continue to determine which core and plugin tools are
+        eligible for the agent.
+        """
+        descriptors = [
+            descriptor
+            for name in self._tool_registry.names()
+            if (descriptor := self._tool_registry.get(name)) is not None
+        ]
+        required_modes = {
+            mode
+            for descriptor in descriptors
+            for mode in descriptor.requires_modes
+        }
+        required_skills = {
+            skill
+            for descriptor in descriptors
+            for skill in descriptor.requires_skills
+        }
+        required_features = {
+            feature
+            for descriptor in descriptors
+            for feature in descriptor.requires_features
+        }
+        allowed, denied = self._resolve_config_gates(agent_config)
+        return self._tool_registry.filter(
+            active_modes=required_modes,
+            active_skills=required_skills,
+            enabled_features=required_features,
+            allowed=allowed,
+            denied=denied,
+        )
 
     async def list_tools(  # type: ignore[override]
         self,

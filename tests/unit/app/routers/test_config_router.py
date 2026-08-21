@@ -41,6 +41,8 @@ from qwenpaw.config.config import (
     TelegramConfig,
     ToolGuardConfig,
 )
+from qwenpaw.security.mutation_guard.catalog import ToolPermissionEntry
+from qwenpaw.security.mutation_guard.policy import ActionEffect
 from qwenpaw.constant import (
     HEARTBEAT_FILE,
     HEARTBEAT_TARGET_INBOX,
@@ -649,6 +651,80 @@ def test_get_tool_guard_returns_current_config(client):
 
     assert response.status_code == 200
     assert response.json()["enabled"] is True
+
+
+def test_get_tool_permissions_uses_header_selected_workspace(client):
+    selected_workspace = MagicMock(name="SelectedWorkspace")
+    selected_workspace.agent_id = "agent-b"
+    config = Config()
+    entry = ToolPermissionEntry(
+        name="memory_search",
+        effect=ActionEffect.UNKNOWN,
+        allowed_for_member=False,
+    )
+
+    async def get_selected_workspace(request):
+        assert request.headers["X-Agent-Id"] == "agent-b"
+        return selected_workspace
+
+    with (
+        patch(
+            "qwenpaw.app.agent_context.get_agent_for_request",
+            new=AsyncMock(side_effect=get_selected_workspace),
+        ),
+        patch(
+            "qwenpaw.app.routers.config.collect_tool_permissions",
+            new=AsyncMock(return_value=[entry]),
+        ) as collector,
+        patch(
+            "qwenpaw.app.routers.config.load_config",
+            return_value=config,
+        ),
+    ):
+        response = client.get(
+            "/api/config/security/mutation-guard/tool-permissions",
+            headers={"X-Agent-Id": "agent-b"},
+        )
+
+    assert response.status_code == 200, response.text
+    assert response.json() == [
+        {
+            "name": "memory_search",
+            "effect": "unknown",
+            "allowed_for_member": False,
+        },
+    ]
+    collector.assert_awaited_once_with(
+        selected_workspace,
+        config.security.mutation_guard,
+    )
+
+
+def test_get_tool_permissions_does_not_write_configuration(
+    client,
+    patch_get_agent,
+):
+    config = Config()
+    with (
+        patch(
+            "qwenpaw.app.routers.config.collect_tool_permissions",
+            new=AsyncMock(return_value=[]),
+        ),
+        patch(
+            "qwenpaw.app.routers.config.mutate_config",
+        ) as mutate,
+        patch(
+            "qwenpaw.app.routers.config.load_config",
+            return_value=config,
+        ),
+    ):
+        response = client.get(
+            "/api/config/security/mutation-guard/tool-permissions",
+        )
+
+    assert response.status_code == 200, response.text
+    assert response.json() == []
+    mutate.assert_not_called()
 
 
 def test_put_tool_guard_saves_and_reloads_engine(client):

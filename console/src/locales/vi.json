@@ -1680,7 +1680,26 @@
       "denyMessage": "Thông báo từ chối quyền",
       "loadFailed": "Tải cài đặt bảo vệ thay đổi thất bại",
       "saveSuccess": "Đã lưu cài đặt bảo vệ thay đổi",
-      "saveFailed": "Lưu cài đặt bảo vệ thay đổi thất bại"
+      "saveFailed": "Lưu cài đặt bảo vệ thay đổi thất bại",
+      "catalog": {
+        "title": "Danh mục quyền công cụ",
+        "description": "Chế độ chỉ đọc hiển thị các công cụ mà tác nhân đã chọn có thể tải và quyền thực tế của tài khoản thông thường theo cấu hình Mutation Guard đã lưu.",
+        "toolName": "Tên công cụ",
+        "classification": "Phân loại",
+        "normalAccount": "Tài khoản thông thường",
+        "allowed": "Được phép",
+        "denied": "Bị từ chối",
+        "empty": "Không tìm thấy công cụ có thể tải",
+        "loadFailed": "Không thể tải danh mục quyền công cụ",
+        "retry": "Thử lại",
+        "effects": {
+          "read": "READ",
+          "mutate": "MUTATE",
+          "externalSideEffect": "EXTERNAL_SIDE_EFFECT",
+          "chatInfrastructure": "CHAT_INFRASTRUCTURE",
+          "unknown": "UNKNOWN"
+        }
+      }
     },
     "fileGuard": {
       "title": "File Guard",

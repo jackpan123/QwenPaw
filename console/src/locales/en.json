@@ -3250,7 +3250,26 @@
       "denyMessage": "Permission denial message",
       "loadFailed": "Failed to load Mutation Guard settings",
       "saveSuccess": "Mutation Guard settings saved",
-      "saveFailed": "Failed to save Mutation Guard settings"
+      "saveFailed": "Failed to save Mutation Guard settings",
+      "catalog": {
+        "title": "Tool permission catalog",
+        "description": "Read-only view of tools the selected agent may load and the effective permission for a normal account under the saved Mutation Guard settings.",
+        "toolName": "Tool name",
+        "classification": "Classification",
+        "normalAccount": "Normal account",
+        "allowed": "Allowed",
+        "denied": "Denied",
+        "empty": "No loadable tools found",
+        "loadFailed": "Failed to load the tool permission catalog",
+        "retry": "Retry",
+        "effects": {
+          "read": "READ",
+          "mutate": "MUTATE",
+          "externalSideEffect": "EXTERNAL_SIDE_EFFECT",
+          "chatInfrastructure": "CHAT_INFRASTRUCTURE",
+          "unknown": "UNKNOWN"
+        }
+      }
     },
     "rules": {
       "title": "Detection Rules",

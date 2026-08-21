@@ -5,6 +5,7 @@ import api from "../../../../api";
 import type { MutationGuardConfig } from "../../../../api/modules/security";
 import { useAppMessage } from "../../../../hooks/useAppMessage";
 import styles from "../index.module.less";
+import { ToolPermissionCatalog } from "./ToolPermissionCatalog";
 
 export function MutationGuardTab() {
   const { t } = useTranslation();
@@ -16,6 +17,7 @@ export function MutationGuardTab() {
   const [error, setError] = useState<string | null>(null);
   const [timeoutValue, setTimeoutValue] = useState<number | null>(null);
   const [timeoutInvalid, setTimeoutInvalid] = useState(false);
+  const [catalogRefreshToken, setCatalogRefreshToken] = useState(0);
   const mountedRef = useRef(false);
   const loadGenerationRef = useRef(0);
   const saveGenerationRef = useRef(0);
@@ -109,6 +111,7 @@ export function MutationGuardTab() {
       if (!mountedRef.current || generation !== saveGenerationRef.current) {
         return;
       }
+      setCatalogRefreshToken((token) => token + 1);
       if (draftRevisionRef.current === revision) {
         setDraft(saved);
         setTimeoutValue(saved.classifier_timeout_seconds);
@@ -131,15 +134,27 @@ export function MutationGuardTab() {
 
   if (loading) {
     return (
-      <div className={styles.mutationGuardState}>{t("common.loading")}</div>
+      <div className={styles.tabContent}>
+        <div>
+          <div className={styles.mutationGuardState}>{t("common.loading")}</div>
+        </div>
+        <ToolPermissionCatalog refreshToken={catalogRefreshToken} />
+      </div>
     );
   }
 
   if (!draft) {
     return (
-      <div className={styles.mutationGuardState}>
-        <span role="alert">{error ? t(error) : null}</span>
-        <Button onClick={() => void load()}>{t("environments.retry")}</Button>
+      <div className={styles.tabContent}>
+        <div>
+          <div className={styles.mutationGuardState}>
+            <span role="alert">{error ? t(error) : null}</span>
+            <Button onClick={() => void load()}>
+              {t("environments.retry")}
+            </Button>
+          </div>
+        </div>
+        <ToolPermissionCatalog refreshToken={catalogRefreshToken} />
       </div>
     );
   }
@@ -148,153 +163,158 @@ export function MutationGuardTab() {
 
   return (
     <div className={styles.tabContent}>
-      <p className={styles.tabDescription}>
-        {t("security.mutationGuard.description")}
-      </p>
+      <div>
+        <p className={styles.tabDescription}>
+          {t("security.mutationGuard.description")}
+        </p>
 
-      <div className={styles.mutationGuardForm}>
-        <div className={styles.mutationGuardRow}>
-          <label htmlFor="mutation-guard-enabled">
-            {t("security.mutationGuard.enabled")}
-          </label>
-          <Switch
-            id="mutation-guard-enabled"
-            aria-label={t("security.mutationGuard.enabled")}
-            checked={draft.enabled}
-            disabled={saving}
-            onChange={(enabled) => updateDraft({ enabled })}
-          />
-        </div>
+        <div className={styles.mutationGuardForm}>
+          <div className={styles.mutationGuardRow}>
+            <label htmlFor="mutation-guard-enabled">
+              {t("security.mutationGuard.enabled")}
+            </label>
+            <Switch
+              id="mutation-guard-enabled"
+              aria-label={t("security.mutationGuard.enabled")}
+              checked={draft.enabled}
+              disabled={saving}
+              onChange={(enabled) => updateDraft({ enabled })}
+            />
+          </div>
 
-        <div className={styles.mutationGuardField}>
-          <label htmlFor="mutation-guard-role-input">
-            {t("security.mutationGuard.privilegedRoles")}
-          </label>
-          <div className={styles.mutationGuardRoleInput}>
-            <div className={styles.mutationGuardRoles}>
-              {draft.privileged_roles.map((role) => (
-                <Tag key={role}>
-                  <span>{role}</span>
-                  <button
-                    type="button"
-                    className={styles.mutationGuardRemoveRole}
-                    aria-label={t("security.mutationGuard.removeRole", {
-                      role,
-                    })}
-                    disabled={dependentDisabled}
-                    onClick={() => removeRole(role)}
-                  >
-                    ×
-                  </button>
-                </Tag>
-              ))}
+          <div className={styles.mutationGuardField}>
+            <label htmlFor="mutation-guard-role-input">
+              {t("security.mutationGuard.privilegedRoles")}
+            </label>
+            <div className={styles.mutationGuardRoleInput}>
+              <div className={styles.mutationGuardRoles}>
+                {draft.privileged_roles.map((role) => (
+                  <Tag key={role}>
+                    <span>{role}</span>
+                    <button
+                      type="button"
+                      className={styles.mutationGuardRemoveRole}
+                      aria-label={t("security.mutationGuard.removeRole", {
+                        role,
+                      })}
+                      disabled={dependentDisabled}
+                      onClick={() => removeRole(role)}
+                    >
+                      ×
+                    </button>
+                  </Tag>
+                ))}
+              </div>
+              <Input
+                id="mutation-guard-role-input"
+                aria-label={t("security.mutationGuard.privilegedRoles")}
+                value={roleInput}
+                placeholder={t("security.mutationGuard.rolesPlaceholder")}
+                disabled={dependentDisabled}
+                onChange={(event) => setRoleInput(event.target.value)}
+                onBlur={addRole}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === ",") {
+                    event.preventDefault();
+                    addRole();
+                  }
+                }}
+              />
             </div>
-            <Input
-              id="mutation-guard-role-input"
-              aria-label={t("security.mutationGuard.privilegedRoles")}
-              value={roleInput}
-              placeholder={t("security.mutationGuard.rolesPlaceholder")}
+          </div>
+
+          <div className={styles.mutationGuardRow}>
+            <label htmlFor="mutation-guard-precheck">
+              {t("security.mutationGuard.intentPrecheck")}
+            </label>
+            <Switch
+              id="mutation-guard-precheck"
+              aria-label={t("security.mutationGuard.intentPrecheck")}
+              checked={draft.intent_precheck_enabled}
               disabled={dependentDisabled}
-              onChange={(event) => setRoleInput(event.target.value)}
-              onBlur={addRole}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" || event.key === ",") {
-                  event.preventDefault();
-                  addRole();
+              onChange={(intent_precheck_enabled) =>
+                updateDraft({ intent_precheck_enabled })
+              }
+            />
+          </div>
+
+          <div className={styles.mutationGuardField}>
+            <label htmlFor="mutation-guard-timeout">
+              {t("security.mutationGuard.classifierTimeout")}
+            </label>
+            <InputNumber
+              id="mutation-guard-timeout"
+              aria-label={t("security.mutationGuard.classifierTimeout")}
+              min={1}
+              max={60}
+              value={timeoutValue}
+              disabled={dependentDisabled || !draft.intent_precheck_enabled}
+              onChange={(value: unknown) => {
+                const eventValue = (
+                  value as { target?: { value?: string } } | null
+                )?.target?.value;
+                const rawValue = eventValue ?? value;
+                const parsedValue =
+                  rawValue === null || rawValue === ""
+                    ? null
+                    : Number(rawValue);
+                const nextValue =
+                  parsedValue !== null && Number.isFinite(parsedValue)
+                    ? parsedValue
+                    : null;
+                setTimeoutValue(nextValue);
+                const valid =
+                  nextValue !== null &&
+                  Number.isInteger(nextValue) &&
+                  nextValue >= 1 &&
+                  nextValue <= 60;
+                setTimeoutInvalid(!valid);
+                if (valid) {
+                  updateDraft({ classifier_timeout_seconds: nextValue });
                 }
               }}
+            />
+            {timeoutInvalid && (
+              <span role="alert" className={styles.mutationGuardFieldError}>
+                {t("security.mutationGuard.timeoutInvalid")}
+              </span>
+            )}
+          </div>
+
+          <div className={styles.mutationGuardField}>
+            <label htmlFor="mutation-guard-deny-message">
+              {t("security.mutationGuard.denyMessage")}
+            </label>
+            <Input.TextArea
+              id="mutation-guard-deny-message"
+              aria-label={t("security.mutationGuard.denyMessage")}
+              rows={3}
+              value={draft.deny_message}
+              disabled={dependentDisabled}
+              onChange={(event) =>
+                updateDraft({ deny_message: event.target.value })
+              }
             />
           </div>
         </div>
 
-        <div className={styles.mutationGuardRow}>
-          <label htmlFor="mutation-guard-precheck">
-            {t("security.mutationGuard.intentPrecheck")}
-          </label>
-          <Switch
-            id="mutation-guard-precheck"
-            aria-label={t("security.mutationGuard.intentPrecheck")}
-            checked={draft.intent_precheck_enabled}
-            disabled={dependentDisabled}
-            onChange={(intent_precheck_enabled) =>
-              updateDraft({ intent_precheck_enabled })
+        {error && <div className={styles.mutationGuardError}>{t(error)}</div>}
+        <div className={styles.mutationGuardActions}>
+          <Button
+            type="primary"
+            onClick={() => void save()}
+            aria-disabled={
+              saving || timeoutInvalid || draft.privileged_roles.length === 0
             }
-          />
-        </div>
-
-        <div className={styles.mutationGuardField}>
-          <label htmlFor="mutation-guard-timeout">
-            {t("security.mutationGuard.classifierTimeout")}
-          </label>
-          <InputNumber
-            id="mutation-guard-timeout"
-            aria-label={t("security.mutationGuard.classifierTimeout")}
-            min={1}
-            max={60}
-            value={timeoutValue}
-            disabled={dependentDisabled || !draft.intent_precheck_enabled}
-            onChange={(value: unknown) => {
-              const eventValue = (
-                value as { target?: { value?: string } } | null
-              )?.target?.value;
-              const rawValue = eventValue ?? value;
-              const parsedValue =
-                rawValue === null || rawValue === "" ? null : Number(rawValue);
-              const nextValue =
-                parsedValue !== null && Number.isFinite(parsedValue)
-                  ? parsedValue
-                  : null;
-              setTimeoutValue(nextValue);
-              const valid =
-                nextValue !== null &&
-                Number.isInteger(nextValue) &&
-                nextValue >= 1 &&
-                nextValue <= 60;
-              setTimeoutInvalid(!valid);
-              if (valid) {
-                updateDraft({ classifier_timeout_seconds: nextValue });
-              }
-            }}
-          />
-          {timeoutInvalid && (
-            <span role="alert" className={styles.mutationGuardFieldError}>
-              {t("security.mutationGuard.timeoutInvalid")}
-            </span>
-          )}
-        </div>
-
-        <div className={styles.mutationGuardField}>
-          <label htmlFor="mutation-guard-deny-message">
-            {t("security.mutationGuard.denyMessage")}
-          </label>
-          <Input.TextArea
-            id="mutation-guard-deny-message"
-            aria-label={t("security.mutationGuard.denyMessage")}
-            rows={3}
-            value={draft.deny_message}
-            disabled={dependentDisabled}
-            onChange={(event) =>
-              updateDraft({ deny_message: event.target.value })
+            disabled={
+              saving || timeoutInvalid || draft.privileged_roles.length === 0
             }
-          />
+          >
+            {t("common.save")}
+          </Button>
         </div>
       </div>
-
-      {error && <div className={styles.mutationGuardError}>{t(error)}</div>}
-      <div className={styles.mutationGuardActions}>
-        <Button
-          type="primary"
-          onClick={() => void save()}
-          aria-disabled={
-            saving || timeoutInvalid || draft.privileged_roles.length === 0
-          }
-          disabled={
-            saving || timeoutInvalid || draft.privileged_roles.length === 0
-          }
-        >
-          {t("common.save")}
-        </Button>
-      </div>
+      <ToolPermissionCatalog refreshToken={catalogRefreshToken} />
     </div>
   );
 }
