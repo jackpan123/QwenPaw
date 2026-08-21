@@ -1,11 +1,16 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import type { MutationGuardConfig } from "../../../api/modules/security";
+import type { ReactNode } from "react";
+import type {
+  MutationGuardConfig,
+  ToolPermissionInfo,
+} from "../../../api/modules/security";
 
 const hoisted = vi.hoisted(() => ({
   apiMocks: {
     getMutationGuard: vi.fn(),
+    getToolPermissions: vi.fn(),
     updateMutationGuard: vi.fn(),
     updateToolGuard: vi.fn(),
   },
@@ -18,6 +23,29 @@ const hoisted = vi.hoisted(() => ({
 vi.mock("../../../api", () => ({
   default: hoisted.apiMocks,
 }));
+
+vi.mock("@agentscope-ai/design", async () => {
+  const React = await import("react");
+  const design = await import("../../../test/design-mock");
+  const table = ({
+    dataSource = [],
+    locale = {},
+  }: {
+    dataSource?: { name: string }[];
+    locale?: { emptyText?: ReactNode };
+  }) =>
+    React.createElement(
+      "div",
+      null,
+      dataSource.length
+        ? dataSource.map((item: { name: string }) =>
+            React.createElement("span", { key: item.name }, item.name),
+          )
+        : locale.emptyText,
+    );
+
+  return { ...design, Table: table };
+});
 
 vi.mock("../../../hooks/useAppMessage", () => ({
   useAppMessage: () => ({ message: hoisted.messageMocks }),
@@ -54,6 +82,7 @@ describe("MutationGuardTab", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     hoisted.apiMocks.getMutationGuard.mockResolvedValue(config);
+    hoisted.apiMocks.getToolPermissions.mockResolvedValue([]);
     hoisted.apiMocks.updateMutationGuard.mockImplementation(
       async (body) => body,
     );
@@ -90,6 +119,33 @@ describe("MutationGuardTab", () => {
     ).toHaveValue("当前账号没有权限");
   });
 
+  it("loads the catalog while Mutation Guard settings are still loading", async () => {
+    const pendingSettings = deferred<MutationGuardConfig>();
+    const catalog: ToolPermissionInfo[] = [
+      {
+        name: "memory_search",
+        effect: "unknown",
+        allowed_for_member: false,
+      },
+    ];
+    hoisted.apiMocks.getMutationGuard.mockReturnValueOnce(
+      pendingSettings.promise,
+    );
+    hoisted.apiMocks.getToolPermissions.mockResolvedValueOnce(catalog);
+
+    render(<MutationGuardTab />);
+
+    expect(screen.getByText("common.loading")).toBeInTheDocument();
+    expect(await screen.findByText("memory_search")).toBeInTheDocument();
+    expect(hoisted.apiMocks.getToolPermissions).toHaveBeenCalledTimes(1);
+
+    pendingSettings.resolve(config);
+    expect(
+      await screen.findByText("security.mutationGuard.description"),
+    ).toBeInTheDocument();
+    expect(hoisted.apiMocks.getToolPermissions).toHaveBeenCalledTimes(1);
+  });
+
   it("saves independently without touching Tool Guard", async () => {
     const user = userEvent.setup();
     render(<MutationGuardTab />);
@@ -118,6 +174,82 @@ describe("MutationGuardTab", () => {
     expect(hoisted.messageMocks.success).toHaveBeenCalledWith(
       "security.mutationGuard.saveSuccess",
     );
+  });
+
+  it("refreshes the catalog after a successful save", async () => {
+    const user = userEvent.setup();
+    hoisted.apiMocks.getToolPermissions
+      .mockResolvedValueOnce([
+        { name: "shell", effect: "mutate", allowed_for_member: false },
+      ])
+      .mockResolvedValueOnce([
+        { name: "shell", effect: "mutate", allowed_for_member: true },
+      ]);
+    render(<MutationGuardTab />);
+    await screen.findByText("security.mutationGuard.description");
+    await waitFor(() => {
+      expect(hoisted.apiMocks.getToolPermissions).toHaveBeenCalledTimes(1);
+    });
+
+    await user.click(screen.getByRole("button", { name: "common.save" }));
+
+    await waitFor(() => {
+      expect(hoisted.apiMocks.updateMutationGuard).toHaveBeenCalledTimes(1);
+      expect(hoisted.apiMocks.getToolPermissions).toHaveBeenCalledTimes(2);
+    });
+    expect(hoisted.messageMocks.success).toHaveBeenCalledWith(
+      "security.mutationGuard.saveSuccess",
+    );
+  });
+
+  it("does not refresh the catalog after a failed save", async () => {
+    const user = userEvent.setup();
+    hoisted.apiMocks.updateMutationGuard.mockRejectedValueOnce(
+      new Error("write failed"),
+    );
+    render(<MutationGuardTab />);
+    await screen.findByText("security.mutationGuard.description");
+    expect(hoisted.apiMocks.getToolPermissions).toHaveBeenCalledTimes(1);
+
+    await user.click(screen.getByRole("button", { name: "common.save" }));
+
+    await screen.findByText("security.mutationGuard.saveFailed");
+    expect(hoisted.apiMocks.getToolPermissions).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps Mutation Guard controls usable when catalog loading fails", async () => {
+    hoisted.apiMocks.getToolPermissions.mockRejectedValueOnce(
+      new Error("catalog unavailable"),
+    );
+    render(<MutationGuardTab />);
+
+    await screen.findByText("security.mutationGuard.description");
+    expect(
+      await screen.findByText("security.mutationGuard.catalog.loadFailed"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("switch", {
+        name: "security.mutationGuard.enabled",
+      }),
+    ).toBeEnabled();
+    expect(screen.getByRole("button", { name: "common.save" })).toBeEnabled();
+  });
+
+  it("keeps a successful save successful when its catalog refresh fails", async () => {
+    const user = userEvent.setup();
+    hoisted.apiMocks.getToolPermissions
+      .mockResolvedValueOnce([])
+      .mockRejectedValueOnce(new Error("catalog refresh unavailable"));
+    render(<MutationGuardTab />);
+    await screen.findByText("security.mutationGuard.description");
+
+    await user.click(screen.getByRole("button", { name: "common.save" }));
+
+    await screen.findByText("security.mutationGuard.catalog.loadFailed");
+    expect(hoisted.messageMocks.success).toHaveBeenCalledWith(
+      "security.mutationGuard.saveSuccess",
+    );
+    expect(hoisted.messageMocks.error).not.toHaveBeenCalled();
   });
 
   it("shows a retryable load error", async () => {
@@ -252,6 +384,7 @@ describe("MutationGuardTab", () => {
 
     expect(hoisted.messageMocks.success).not.toHaveBeenCalled();
     expect(hoisted.messageMocks.error).not.toHaveBeenCalled();
+    expect(hoisted.apiMocks.getToolPermissions).toHaveBeenCalledTimes(1);
   });
 
   it("ignores an initial load response after unmount", async () => {
