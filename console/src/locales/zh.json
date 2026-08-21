@@ -3107,7 +3107,26 @@
       "denyMessage": "无权限提示语",
       "loadFailed": "加载变更防护设置失败",
       "saveSuccess": "变更防护设置已保存",
-      "saveFailed": "保存变更防护设置失败"
+      "saveFailed": "保存变更防护设置失败",
+      "catalog": {
+        "title": "工具权限分类",
+        "description": "只读展示当前智能体可能加载的工具，以及在已保存的变更防护配置下普通账号的实际权限。",
+        "toolName": "工具名",
+        "classification": "分类",
+        "normalAccount": "普通账号",
+        "allowed": "允许",
+        "denied": "拒绝",
+        "empty": "未发现可加载的工具",
+        "loadFailed": "加载工具权限分类失败",
+        "retry": "重试",
+        "effects": {
+          "read": "READ",
+          "mutate": "MUTATE",
+          "externalSideEffect": "EXTERNAL_SIDE_EFFECT",
+          "chatInfrastructure": "CHAT_INFRASTRUCTURE",
+          "unknown": "UNKNOWN"
+        }
+      }
     },
     "rules": {
       "title": "检测规则",

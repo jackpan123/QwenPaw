@@ -2869,7 +2869,26 @@
       "denyMessage": "Mensagem de permissão negada",
       "loadFailed": "Falha ao carregar a proteção de alterações",
       "saveSuccess": "Configurações da proteção de alterações salvas",
-      "saveFailed": "Falha ao salvar a proteção de alterações"
+      "saveFailed": "Falha ao salvar a proteção de alterações",
+      "catalog": {
+        "title": "Catálogo de permissões de ferramentas",
+        "description": "Visualização somente leitura das ferramentas que o agente selecionado pode carregar e da permissão efetiva de uma conta comum conforme as configurações salvas do Mutation Guard.",
+        "toolName": "Nome da ferramenta",
+        "classification": "Classificação",
+        "normalAccount": "Conta comum",
+        "allowed": "Permitido",
+        "denied": "Negado",
+        "empty": "Nenhuma ferramenta carregável encontrada",
+        "loadFailed": "Falha ao carregar o catálogo de permissões",
+        "retry": "Tentar novamente",
+        "effects": {
+          "read": "READ",
+          "mutate": "MUTATE",
+          "externalSideEffect": "EXTERNAL_SIDE_EFFECT",
+          "chatInfrastructure": "CHAT_INFRASTRUCTURE",
+          "unknown": "UNKNOWN"
+        }
+      }
     },
     "rules": {
       "title": "Detection Rules",

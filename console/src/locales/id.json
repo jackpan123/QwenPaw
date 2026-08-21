@@ -870,7 +870,26 @@
       "denyMessage": "Pesan penolakan izin",
       "loadFailed": "Gagal memuat pengaturan Mutation Guard",
       "saveSuccess": "Pengaturan Mutation Guard tersimpan",
-      "saveFailed": "Gagal menyimpan pengaturan Mutation Guard"
+      "saveFailed": "Gagal menyimpan pengaturan Mutation Guard",
+      "catalog": {
+        "title": "Katalog izin alat",
+        "description": "Tampilan hanya-baca untuk alat yang mungkin dimuat agen terpilih dan izin efektif akun biasa berdasarkan pengaturan Mutation Guard yang tersimpan.",
+        "toolName": "Nama alat",
+        "classification": "Klasifikasi",
+        "normalAccount": "Akun biasa",
+        "allowed": "Diizinkan",
+        "denied": "Ditolak",
+        "empty": "Tidak ada alat yang dapat dimuat",
+        "loadFailed": "Gagal memuat katalog izin alat",
+        "retry": "Coba lagi",
+        "effects": {
+          "read": "READ",
+          "mutate": "MUTATE",
+          "externalSideEffect": "EXTERNAL_SIDE_EFFECT",
+          "chatInfrastructure": "CHAT_INFRASTRUCTURE",
+          "unknown": "UNKNOWN"
+        }
+      }
     },
     "rules": {
       "title": "Aturan Deteksi",
