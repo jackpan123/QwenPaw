@@ -38,6 +38,10 @@ from ...config.config import (
     SkillScannerConfig,
     SkillScannerWhitelistEntry,
 )
+from ...security.mutation_guard.catalog import (
+    ToolPermissionEntry,
+    collect_tool_permissions,
+)
 from ...utils.io_utils import run_sync_io
 from ...config.timezone import normalize_tz
 from ..channels.conflict import (
@@ -836,6 +840,21 @@ async def put_user_timezone(
 async def get_mutation_guard() -> MutationGuardConfig:
     config = load_config()
     return config.security.mutation_guard
+
+
+@router.get(
+    "/security/mutation-guard/tool-permissions",
+    response_model=List[ToolPermissionEntry],
+    summary="List effective tool permissions for a normal account",
+)
+async def get_tool_permissions(
+    request: Request,
+) -> List[ToolPermissionEntry]:
+    from ..agent_context import get_agent_for_request
+
+    workspace = await get_agent_for_request(request)
+    config = load_config().security.mutation_guard
+    return await collect_tool_permissions(workspace, config)
 
 
 @router.put(
