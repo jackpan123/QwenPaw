@@ -5,14 +5,15 @@ Subclasses AgentScope's :class:`LocalWorkspace` so that
 :meth:`list_tools` returns QwenPaw's own tools (managed by
 :class:`ToolRegistry`) instead of AgentScope's built-in six.
 
-All runtime tool consumers call ``list_tools()``. The read-only metadata
-seam ``list_potential_tool_descriptors()`` exposes potentially loadable
-descriptors for catalog consumers:
+All runtime tool consumers call ``list_tools()``:
 
 - **No arguments**: returns default-enabled tools (``WorkspaceBase``
   protocol).
 - **With filter kwargs**: returns tools filtered by per-request
   context (modes, skills, features, agent config gates).
+
+The read-only metadata seam ``list_potential_tool_descriptors(agent_config)``
+exposes potentially loadable descriptors for catalog consumers.
 
 ``ToolRegistry`` is an internal implementation detail.
 """
