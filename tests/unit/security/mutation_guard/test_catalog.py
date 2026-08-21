@@ -16,6 +16,7 @@ from qwenpaw.security.mutation_guard.catalog import (
     ToolPermissionEntry,
     _candidate_from_dynamic_tool,
     build_tool_permission_entries,
+    collect_tool_permissions,
 )
 
 
@@ -58,9 +59,7 @@ def test_build_entries_sorts_and_uses_authoritative_enabled_policy():
 
 
 def test_build_entries_allows_every_effect_when_guard_is_disabled():
-    candidates = [
-        ToolEffectCandidate(effect.value, effect) for effect in ActionEffect
-    ]
+    candidates = [ToolEffectCandidate(e.value, e) for e in ActionEffect]
 
     entries = build_tool_permission_entries(candidates, _config(False))
 
@@ -152,3 +151,250 @@ def test_candidate_from_dynamic_tool_falls_back_from_empty_name():
     candidate = _candidate_from_dynamic_tool(tool)
 
     assert candidate.name == "fallback_name"
+
+
+class _FakeLocalWorkspace:
+    def __init__(self, descriptors):
+        self.descriptors = descriptors
+        self.configs: list[object] = []
+
+    def list_potential_tool_descriptors(self, config):
+        self.configs.append(config)
+        return self.descriptors
+
+
+class _FakeMemoryManager:
+    def list_memory_tools(self):
+        def memory_search():
+            raise AssertionError("tool bodies must not run during discovery")
+
+        return [memory_search]
+
+
+class _FakeDriverManager:
+    def __init__(self, capabilities):
+        self.capabilities = capabilities
+        self.request_context = None
+
+    async def list_capabilities(self, *, kind, request_context):
+        assert kind == "tool"
+        self.request_context = request_context
+        return self.capabilities
+
+
+def _workspace(
+    config,
+    *,
+    descriptors=(),
+    memory_manager=None,
+    driver_manager=None,
+):
+    return SimpleNamespace(
+        config=config,
+        local_workspace=_FakeLocalWorkspace(descriptors),
+        memory_manager=memory_manager,
+        driver_manager=driver_manager,
+        workspace_dir="/tmp/catalog-workspace",
+        agent_id="catalog-agent",
+    )
+
+
+def _catalog_agent_config(
+    *,
+    coding_enabled=True,
+    strategy="scroll",
+    visual_enabled=True,
+):
+    return SimpleNamespace(
+        coding_mode=SimpleNamespace(enabled=coding_enabled),
+        running=SimpleNamespace(
+            light_context_config=SimpleNamespace(
+                strategy=strategy,
+                scroll_config=SimpleNamespace(
+                    db_filename="history.db",
+                    repl_timeout_s=12,
+                    allow_unsandboxed=False,
+                ),
+                tool_result_pruning_config=SimpleNamespace(
+                    pruning_recent_msg_max_bytes=4096,
+                ),
+                visual_compact_config=SimpleNamespace(enabled=visual_enabled),
+            ),
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_collect_tool_permissions_discovers_available_sources(
+    monkeypatch,
+):
+    config = _catalog_agent_config()
+    coding_calls: list[dict[str, object]] = []
+
+    def collect_coding_tools(**kwargs):
+        coding_calls.append(kwargs)
+        return [
+            SimpleNamespace(
+                name="coding_read",
+                _qp_effect_spec=ToolEffectSpec(ActionEffect.READ),
+            ),
+        ]
+
+    monkeypatch.setattr(
+        "qwenpaw.modes.coding.collect_coding_tools",
+        collect_coding_tools,
+    )
+    monkeypatch.setattr(
+        "qwenpaw.security.mutation_guard.catalog._scroll_repl_available",
+        lambda scroll_config: True,
+    )
+    driver_manager = _FakeDriverManager(
+        [
+            SimpleNamespace(
+                name="driver-original",
+                effect=ActionEffect.READ,
+                exposure=SimpleNamespace(
+                    as_tool=True,
+                    tool_name="driver_read",
+                ),
+            ),
+            SimpleNamespace(
+                name="driver_hidden",
+                effect=ActionEffect.MUTATE,
+                exposure=SimpleNamespace(as_tool=False, tool_name=""),
+            ),
+        ],
+    )
+    workspace = _workspace(
+        config,
+        descriptors=[
+            SimpleNamespace(
+                name="mode_registered",
+                effect=ToolEffectSpec(ActionEffect.MUTATE),
+            ),
+        ],
+        memory_manager=_FakeMemoryManager(),
+        driver_manager=driver_manager,
+    )
+
+    entries = await collect_tool_permissions(workspace, _config(True))
+
+    by_name = {entry.name: entry for entry in entries}
+    assert {
+        "mode_registered",
+        "coding_read",
+        "memory_search",
+        "recall_history",
+        "recall_history_python",
+        "recover_visual_context",
+        "driver_read",
+    }.issubset(by_name)
+    assert by_name["mode_registered"].effect is ActionEffect.MUTATE
+    assert by_name["memory_search"].effect is ActionEffect.UNKNOWN
+    assert by_name["recover_visual_context"].effect is ActionEffect.UNKNOWN
+    assert by_name["driver_read"].effect is ActionEffect.READ
+    assert "driver_hidden" not in by_name
+    assert driver_manager.request_context == {}
+    assert workspace.local_workspace.configs == [config]
+    assert coding_calls == [
+        {
+            "agent_config": config,
+            "workspace_dir": "/tmp/catalog-workspace",
+            "agent_id": "catalog-agent",
+            "request_context": {},
+            "governor": None,
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_collect_tool_permissions_skips_disabled_coding_and_context(
+    monkeypatch,
+):
+    def coding_must_not_run(*args, **kwargs):
+        pytest.fail(
+            "coding collector was called while coding mode is disabled",
+        )
+
+    monkeypatch.setattr(
+        "qwenpaw.modes.coding.collect_coding_tools",
+        coding_must_not_run,
+    )
+    workspace = _workspace(
+        _catalog_agent_config(
+            coding_enabled=False,
+            strategy="native",
+            visual_enabled=False,
+        ),
+    )
+
+    entries = await collect_tool_permissions(workspace, _config(True))
+
+    assert entries == []
+
+
+@pytest.mark.asyncio
+async def test_collect_tool_permissions_omits_unavailable_optional_source(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "qwenpaw.security.mutation_guard.catalog._coding_candidates",
+        lambda workspace: (_ for _ in ()).throw(ImportError("missing coding")),
+    )
+    workspace = _workspace(
+        _catalog_agent_config(
+            strategy="native",
+            visual_enabled=False,
+        ),
+    )
+
+    entries = await collect_tool_permissions(workspace, _config(True))
+
+    assert entries == []
+
+
+@pytest.mark.asyncio
+async def test_collect_tool_permissions_omits_scroll_repl_when_unavailable(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "qwenpaw.security.mutation_guard.catalog._scroll_repl_available",
+        lambda scroll_config: False,
+    )
+    workspace = _workspace(
+        _catalog_agent_config(
+            coding_enabled=False,
+            visual_enabled=False,
+        ),
+    )
+
+    entries = await collect_tool_permissions(workspace, _config(True))
+
+    assert [entry.name for entry in entries] == ["recall_history"]
+
+
+@pytest.mark.asyncio
+async def test_collect_tool_permissions_propagates_cross_source_conflicts():
+    def mode_registered():
+        raise AssertionError("tool bodies must not run during discovery")
+
+    mode_registered.__name__ = "shared"
+    workspace = _workspace(
+        _catalog_agent_config(
+            coding_enabled=False,
+            strategy="native",
+            visual_enabled=False,
+        ),
+        descriptors=[
+            SimpleNamespace(
+                name="shared",
+                effect=ToolEffectSpec(ActionEffect.READ),
+            ),
+        ],
+        memory_manager=SimpleNamespace(
+            list_memory_tools=lambda: [mode_registered],
+        ),
+    )
+
+    with pytest.raises(ValueError, match=r"conflicting effects.*shared"):
+        await collect_tool_permissions(workspace, _config(True))
