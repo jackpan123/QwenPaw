@@ -120,10 +120,18 @@ def test_candidate_from_dynamic_tool_rejects_nameless_object():
 
 
 def test_candidate_from_dynamic_tool_rejects_empty_name():
-    tool = SimpleNamespace(name="", __name__=0)
+    tool = SimpleNamespace(name="", __name__="")
 
     with pytest.raises(
         ValueError,
         match=r"^discovered dynamic tool has no name$",
     ):
         _candidate_from_dynamic_tool(tool)
+
+
+def test_candidate_from_dynamic_tool_falls_back_from_empty_name():
+    tool = SimpleNamespace(name="", __name__="fallback_name")
+
+    candidate = _candidate_from_dynamic_tool(tool)
+
+    assert candidate.name == "fallback_name"
