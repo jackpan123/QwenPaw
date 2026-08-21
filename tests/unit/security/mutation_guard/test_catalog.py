@@ -93,6 +93,18 @@ def test_build_entries_coalesces_matching_duplicates():
     assert entries[0].effect is ActionEffect.READ
 
 
+def test_build_entries_coalesces_equal_effect_from_raw_string():
+    candidates = [
+        ToolEffectCandidate("same", ActionEffect.READ),
+        ToolEffectCandidate("same", ActionEffect.READ.value),
+    ]
+
+    entries = build_tool_permission_entries(candidates, _config(True))
+
+    assert len(entries) == 1
+    assert entries[0].effect == ActionEffect.READ
+
+
 def test_build_entries_rejects_conflicting_duplicates():
     candidates = [
         ToolEffectCandidate("same", ActionEffect.READ),
@@ -422,6 +434,26 @@ async def test_collect_tool_permissions_keeps_other_context_contributors(
     assert "recall_history" in names
     assert "recover_visual_context" in names
     assert "recall_history_python" not in names
+
+
+@pytest.mark.asyncio
+async def test_collect_tool_permissions_omits_failing_driver_source():
+    class _FailingDriverManager:
+        async def list_capabilities(self, *, kind, request_context):
+            raise RuntimeError("driver backend unavailable")
+
+    workspace = _workspace(
+        _catalog_agent_config(
+            coding_enabled=False,
+            strategy="native",
+            visual_enabled=False,
+        ),
+        driver_manager=_FailingDriverManager(),
+    )
+
+    entries = await collect_tool_permissions(workspace, _config(True))
+
+    assert entries == []
 
 
 @pytest.mark.asyncio

@@ -115,7 +115,8 @@ missing effect metadata and is intentionally fail-closed.
 This table is diagnostic only. It cannot enable tools, edit classifications,
 or change permissions. Switching the selected agent reloads that agent's
 catalog, and successfully saving Mutation Guard settings refreshes the
-effective allow/deny column.
+effective allow/deny column. Driver tools are listed for the
+deployment-global driver set; user-scoped Driver tools are not included.
 
 ### Denial responses
 

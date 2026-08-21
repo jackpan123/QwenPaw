@@ -71,7 +71,7 @@ def build_tool_permission_entries(
         if effect is None:
             effects_by_name[candidate.name] = candidate.effect
             continue
-        if effect is not candidate.effect:
+        if effect != candidate.effect:
             raise ValueError(
                 f"conflicting effects for tool {candidate.name!r}: "
                 f"{effect.value} and {candidate.effect.value}",
@@ -273,6 +273,23 @@ def _optional_candidates(
         return []
 
 
+async def _optional_async_candidates(
+    source_name: str,
+    collector: Any,
+    workspace: Any,
+) -> list[ToolEffectCandidate]:
+    """Discover an optional async source, omitting unavailable dependencies."""
+    try:
+        return await collector(workspace)
+    except (ImportError, OSError, RuntimeError):
+        logger.info(
+            "Tool permission catalog omitted unavailable %s tools",
+            source_name,
+            exc_info=True,
+        )
+        return []
+
+
 def _collect_blocking_candidates(
     workspace: _WorkspaceSnapshot,
 ) -> list[ToolEffectCandidate]:
@@ -318,7 +335,11 @@ async def collect_tool_permissions(
         _collect_blocking_candidates,
         snapshot,
     )
-    driver_candidates = await _driver_candidates(workspace)
+    driver_candidates = await _optional_async_candidates(
+        "driver",
+        _driver_candidates,
+        workspace,
+    )
     candidates = [
         *registry_candidates,
         *memory_candidates,
